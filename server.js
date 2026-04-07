@@ -15,7 +15,7 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// En Fly.io /data es un volumen persistente, en local usa ./data
+// Data directory
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 const LOG_PATH = path.join(DATA_DIR, 'logs.json');
@@ -39,7 +39,7 @@ function loadOrGenerateVapidKeys() {
 
 const vapidKeys = loadOrGenerateVapidKeys();
 webpush.setVapidDetails(
-  'mailto:tenisbot@tenis-bot.fly.dev',
+  'mailto:tenisbot@botenis.sdl.ar',
   vapidKeys.publicKey,
   vapidKeys.privateKey
 );
