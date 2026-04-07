@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0f172a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Tenis Bot - CAEP</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+</head>
+<body>
+  <div class="container">
+    <h1>Tenis Bot - CAEP</h1>
+
+    <div id="login-status" class="status"></div>
+
+    <!-- New Reservation -->
+    <section class="card">
+      <h2>Nueva Reserva</h2>
+      <div class="form-group">
+        <label>Nombre (referencia)</label>
+        <input type="text" id="res-name" placeholder="Ej: Tenis martes noche" style="width:100%">
+      </div>
+
+      <div class="form-row-half">
+        <div class="form-group">
+          <label>Modo</label>
+          <select id="cant-jugadores" onchange="updatePlayerFields()">
+            <option value="2">Single</option>
+            <option value="4">Double</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Fecha</label>
+          <input type="date" id="res-fecha">
+        </div>
+      </div>
+
+      <div class="form-row-half">
+        <div class="form-group">
+          <label>Cancha</label>
+          <select id="res-cancha">
+            <option value="">-- Seleccionar --</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Hora</label>
+          <input type="time" id="res-hora" step="900">
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Jugadores</label>
+        <div id="players-container">
+          <div class="player-row player-row-fixed">
+            <input type="text" id="player1-name" class="player-fixed" readonly placeholder="Cargando...">
+            <input type="hidden" id="player1-id">
+          </div>
+          <div class="player-row">
+            <input type="text" class="player-search" placeholder="Buscar jugador (mín 3 letras)..." data-index="2">
+            <select class="player-select" data-index="2"><option value="">-- Buscar primero --</option></select>
+          </div>
+        </div>
+      </div>
+
+      <div id="schedule-info" class="schedule-info"></div>
+
+      <div class="form-row">
+        <button onclick="saveReservation()" class="btn-primary" style="flex:1">Guardar Reserva</button>
+        <button onclick="togglePush()" id="push-btn" class="btn-secondary" style="flex:1">Activar Notificaciones</button>
+      </div>
+      <p id="push-ios-hint" class="push-hint" style="display:none">En iOS, primero agregá la app a la pantalla de inicio y abrila desde ahí.</p>
+      <div id="save-status" class="status"></div>
+      <div id="push-status" class="status"></div>
+    </section>
+
+    <!-- Saved Reservations -->
+    <section class="card">
+      <h2>Reservas Guardadas</h2>
+      <div id="reservations-list"></div>
+    </section>
+
+
+    <!-- Logs -->
+    <section class="card">
+      <h2>Logs</h2>
+      <button onclick="loadLogs()" class="btn-secondary">Actualizar</button>
+      <button onclick="clearLogs()" class="btn-danger">Borrar logs</button>
+      <div id="logs-list"></div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
