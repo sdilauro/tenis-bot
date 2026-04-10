@@ -1,6 +1,6 @@
 // --- API helpers ---
-async function api(method, url, body) {
-  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+async function api(method, url, body, extraHeaders) {
+  const opts = { method, headers: { 'Content-Type': 'application/json', ...extraHeaders } };
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(url, opts);
   return res.json();
@@ -12,6 +12,8 @@ function showStatus(id, msg, type) {
   el.className = `status ${type}`;
 }
 
+const DIAS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+
 // --- Connection & Player 1 ---
 let loggedUser = null;
 
@@ -22,7 +24,7 @@ async function fetchUser() {
     loggedUser = { id: result.userId, name: result.userName };
     document.getElementById('player1-name').value = result.userName;
     document.getElementById('player1-id').value = result.userId;
-    showStatus('login-status', `Conectado como ${result.userName}`, 'success');
+    document.getElementById('login-status').style.display = 'none';
   } else {
     showStatus('login-status', `Error de conexión: ${result.error}`, 'error');
   }
@@ -30,14 +32,12 @@ async function fetchUser() {
 }
 
 // --- Player count toggle ---
-// Player 1 is always the logged-in user (fixed). Searchable players start at index 2.
 function updatePlayerFields() {
   const cant = parseInt(document.getElementById('cant-jugadores').value);
   const container = document.getElementById('players-container');
-  // Count only searchable rows (not the fixed player 1)
   const searchableRows = container.querySelectorAll('.player-row:not(.player-row-fixed)');
   const currentSearchable = searchableRows.length;
-  const needed = cant - 1; // player 1 is fixed
+  const needed = cant - 1;
 
   if (needed > currentSearchable) {
     for (let i = currentSearchable + 2; i <= cant; i++) {
@@ -89,17 +89,19 @@ document.addEventListener('input', async (e) => {
 
 // --- Cancha options ---
 const CANCHAS = [
-  'CANCHA 1', 'CANCHA 2', 'CANCHA 3', 'CANCHA 4', 'CANCHA 5',
-  'CANCHA 6', 'CANCHA 7', 'CANCHA 8', 'CANCHA 9',
+  'Cancha 1', 'Cancha 2', 'Cancha 3', 'Cancha 4', 'Cancha 5',
+  'Cancha 6', 'Cancha 7', 'Cancha 8', 'Cancha 9',
 ];
 
 function populateSelects() {
-  const canchaSelect = document.getElementById('res-cancha');
-  for (const c of CANCHAS) {
-    const opt = document.createElement('option');
-    opt.value = c;
-    opt.textContent = c;
-    canchaSelect.appendChild(opt);
+  for (const selectId of ['res-cancha1', 'res-cancha2']) {
+    const canchaSelect = document.getElementById(selectId);
+    for (const c of CANCHAS) {
+      const opt = document.createElement('option');
+      opt.value = c;
+      opt.textContent = c;
+      canchaSelect.appendChild(opt);
+    }
   }
 }
 
@@ -107,8 +109,6 @@ function populateSelects() {
 function getScheduleForHora(hora) {
   if (!hora) return null;
   const h = parseInt(hora.split(':')[0]);
-  // Mañana: hora < 14 → bot corre a las 20:00 del día anterior
-  // Tarde: hora >= 14 → bot corre a las 08:00 del mismo día
   if (h < 14) {
     return { type: 'morning', time: '19:59', label: 'El bot intentará reservar a las 19:59 del día anterior (10 intentos cada 15s)' };
   } else {
@@ -116,17 +116,19 @@ function getScheduleForHora(hora) {
   }
 }
 
-document.getElementById('res-hora').addEventListener('change', () => {
-  const hora = document.getElementById('res-hora').value;
+function updateScheduleInfo() {
+  const hora1 = document.getElementById('res-hora1').value;
   const info = document.getElementById('schedule-info');
-  const sched = getScheduleForHora(hora);
+  const sched = getScheduleForHora(hora1);
   if (sched) {
     info.textContent = sched.label;
     info.style.display = 'block';
   } else {
     info.style.display = 'none';
   }
-});
+}
+
+document.getElementById('res-hora1').addEventListener('change', updateScheduleInfo);
 
 // --- Save Reservation ---
 async function saveReservation() {
@@ -135,7 +137,6 @@ async function saveReservation() {
 
   const cant = parseInt(document.getElementById('cant-jugadores').value);
 
-  // Player 1 = logged user
   const p1Id = document.getElementById('player1-id').value;
   const p1Name = document.getElementById('player1-name').value;
   if (!p1Id) return showStatus('save-status', 'Esperá a que cargue el jugador 1 (tu usuario)', 'error');
@@ -147,30 +148,32 @@ async function saveReservation() {
       players.push({ id: sel.value, name: sel.options[sel.selectedIndex].text });
     }
   }
-
   if (players.length < cant) return showStatus('save-status', `Seleccioná ${cant} jugadores`, 'error');
 
-  const fecha = document.getElementById('res-fecha').value;
-  if (!fecha) return showStatus('save-status', 'Seleccioná una fecha', 'error');
+  const dia = document.getElementById('res-dia').value;
+  if (dia === '') return showStatus('save-status', 'Seleccioná un día', 'error');
 
-  const hora = document.getElementById('res-hora').value;
-  if (!hora) return showStatus('save-status', 'Seleccioná una hora', 'error');
+  const recurring = document.getElementById('res-recurring').value === '1';
 
-  const cancha = document.getElementById('res-cancha').value;
-  if (!cancha) return showStatus('save-status', 'Seleccioná una cancha', 'error');
+  const cancha1 = document.getElementById('res-cancha1').value;
+  const hora1 = document.getElementById('res-hora1').value;
+  if (!cancha1 || !hora1) return showStatus('save-status', 'Completá la opción 1 (cancha y hora)', 'error');
 
-  // Convert YYYY-MM-DD to DD/MM/YYYY
-  const [y, m, d] = fecha.split('-');
-  const fechaFormatted = `${d}/${m}/${y}`;
+  const cancha2 = document.getElementById('res-cancha2').value;
+  const hora2 = document.getElementById('res-hora2').value;
+  if (!cancha2 || !hora2) return showStatus('save-status', 'Completá la opción 2 (cancha y hora)', 'error');
 
-  const sched = getScheduleForHora(hora);
+  const sched = getScheduleForHora(hora1);
 
   const reservation = {
     name,
     players,
-    fecha: fechaFormatted,
-    hora,
-    cancha,
+    dia: parseInt(dia),
+    recurring,
+    opciones: [
+      { cancha: cancha1, hora: hora1 },
+      { cancha: cancha2, hora: hora2 },
+    ],
     schedule: {
       enabled: true,
       type: sched.type,
@@ -178,15 +181,22 @@ async function saveReservation() {
     },
   };
 
-  const result = await api('POST', '/api/reservations', reservation);
+  const pw = prompt('Contraseña:');
+  if (!pw) return;
+
+  const result = await api('POST', '/api/reservations', reservation, { 'X-Password': pw });
+  if (result.error) return showStatus('save-status', result.error, 'error');
   if (result.ok) {
     showStatus('save-status', 'Reserva guardada', 'success');
     loadReservations();
     // Clear form
     document.getElementById('res-name').value = '';
-    document.getElementById('res-fecha').value = '';
-    document.getElementById('res-hora').value = '';
-    document.getElementById('res-cancha').value = '';
+    document.getElementById('res-dia').value = '';
+    document.getElementById('res-recurring').value = '1';
+    document.getElementById('res-cancha1').value = '';
+    document.getElementById('res-hora1').value = '';
+    document.getElementById('res-cancha2').value = '';
+    document.getElementById('res-hora2').value = '';
     document.getElementById('schedule-info').style.display = 'none';
     document.querySelectorAll('.player-select').forEach(s => s.selectedIndex = 0);
     document.querySelectorAll('.player-search').forEach(s => s.value = '');
@@ -205,9 +215,16 @@ async function loadReservations() {
   }
 
   container.innerHTML = reservations.map(r => {
+    const diaName = DIAS[r.dia] || '?';
+    const recurLabel = r.recurring ? 'Semanal' : 'Única';
+
     const schedLabel = r.schedule?.type === 'morning'
       ? `Bot a las 19:59 del día anterior`
       : `Bot a las 07:59 del mismo día`;
+
+    const opcLabel = (r.opciones || []).map((o, i) =>
+      `Opción ${i + 1}: ${esc(o.cancha)} a las ${esc(o.hora)}`
+    ).join('<br>');
 
     const statusMap = {
       pending: { text: 'Pendiente', cls: 'status-pending' },
@@ -217,30 +234,36 @@ async function loadReservations() {
     const st = statusMap[r.status] || statusMap.pending;
     const attemptsText = r.attempts ? ` (${r.attempts} intento${r.attempts > 1 ? 's' : ''})` : '';
     const errorText = r.lastError && r.status !== 'ok' ? `<div class="meta"><span class="error-detail">${esc(r.lastError)}</span></div>` : '';
+    const lastExecText = r.lastExecutedFecha ? `<div class="meta"><span>Última ejecución: ${esc(r.lastExecutedFecha)}</span></div>` : '';
 
     return `
     <div class="reservation-item">
       <div class="reservation-header">
         <h3>${esc(r.name)}</h3>
-        <span class="reservation-status ${st.cls}">${st.text}${attemptsText}</span>
+        ${r.status === 'pending'
+          ? `<button class="btn-danger btn-sm" onclick="deleteReservation('${r.id}')">Eliminar</button>`
+          : `<span class="reservation-status ${st.cls}">${st.text}${attemptsText}</span>`}
       </div>
       <div class="meta">
-        <span>Jugadores: ${r.players.map(p => esc(p.name)).join(', ')}</span>
+        <span>${esc(diaName)} — ${esc(recurLabel)}</span>
       </div>
       <div class="meta">
-        <span>Fecha: ${esc(r.fecha)} | Hora: ${esc(r.hora)} | ${esc(r.cancha)}</span>
+        <span>${opcLabel}</span>
+      </div>
+      <div class="meta">
+        <span>${r.players.map(p => esc(p.name).toUpperCase()).join('<br>')}</span>
       </div>
       <div class="meta">
         <span>${schedLabel}</span>
       </div>
+      ${lastExecText}
       ${errorText}
       <div class="reservation-actions">
-        ${r.status !== 'ok' ? `<button class="btn-success" onclick="executeNow('${r.id}')">Ejecutar AHORA</button>` : ''}
-        <button class="btn-danger" onclick="deleteReservation('${r.id}')">Eliminar</button>
+        <button class="btn-secondary" onclick='copyReservation(${JSON.stringify(JSON.stringify(r))})'>Copiar</button>
+        ${r.status !== 'ok' ? `<button class="btn-success" onclick="executeNow('${r.id}')">Ejecutar</button>` : ''}
       </div>
     </div>
   `}).join('');
-
 }
 
 function esc(s) {
@@ -257,20 +280,55 @@ async function executeNow(id) {
   btn.disabled = true;
 
   const result = await api('POST', `/api/reservations/${id}/execute`);
-  btn.textContent = 'Ejecutar AHORA';
+  btn.textContent = 'Ejecutar';
   btn.disabled = false;
 
   if (result.success) {
-    alert('Reserva exitosa!');
+    alert(`Reserva exitosa! ${result.cancha || ''} ${result.hora || ''}`);
   } else {
     alert(`Error: ${result.error}\n\nPasos:\n${result.log?.steps?.join('\n') || ''}`);
   }
+  loadReservations();
   loadLogs();
 }
 
+function copyReservation(jsonStr) {
+  const r = JSON.parse(jsonStr);
+  document.getElementById('res-name').value = r.name || '';
+  document.getElementById('res-dia').value = r.dia != null ? r.dia : '';
+  document.getElementById('res-recurring').value = r.recurring ? '1' : '0';
+
+  const opc = r.opciones || [];
+  document.getElementById('res-cancha1').value = opc[0]?.cancha || '';
+  document.getElementById('res-hora1').value = opc[0]?.hora || '';
+  document.getElementById('res-cancha2').value = opc[1]?.cancha || '';
+  document.getElementById('res-hora2').value = opc[1]?.hora || '';
+
+  // Restore player count
+  const cant = (r.players || []).length >= 4 ? 4 : 2;
+  document.getElementById('cant-jugadores').value = cant;
+  updatePlayerFields();
+
+  // Restore player selections (player 1 is fixed, restore 2+)
+  const players = r.players || [];
+  for (let i = 2; i <= cant; i++) {
+    const p = players[i - 1];
+    if (!p) continue;
+    const sel = document.querySelector(`.player-select[data-index="${i}"]`);
+    if (sel) {
+      sel.innerHTML = `<option value="${esc(p.id)}" selected>${esc(p.name)}</option>`;
+    }
+  }
+
+  updateScheduleInfo();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
 async function deleteReservation(id) {
-  if (!confirm('¿Eliminar esta reserva?')) return;
-  await api('DELETE', `/api/reservations/${id}`);
+  const pw = prompt('Contraseña:');
+  if (!pw) return;
+  const result = await api('DELETE', `/api/reservations/${id}`, null, { 'X-Password': pw });
+  if (result.error) return alert(result.error);
   loadReservations();
 }
 
@@ -314,7 +372,6 @@ async function checkPushSubscription() {
     btn.disabled = true;
     return;
   }
-  // iOS hint: show if standalone is available but not active
   if (navigator.standalone === false || (window.matchMedia && window.matchMedia('(display-mode: browser)').matches && /iPhone|iPad/.test(navigator.userAgent))) {
     document.getElementById('push-ios-hint').style.display = 'block';
   }
@@ -332,16 +389,14 @@ async function togglePush() {
   const existing = await reg.pushManager.getSubscription();
 
   if (existing) {
-    // Unsubscribe
     await existing.unsubscribe();
     await api('POST', '/api/push/unsubscribe', { endpoint: existing.endpoint });
     btn.textContent = 'Activar Notificaciones';
-    btn.className = 'btn-primary';
+    btn.className = 'btn-secondary';
     showStatus('push-status', 'Notificaciones desactivadas', 'info');
     return;
   }
 
-  // Subscribe
   const permission = await Notification.requestPermission();
   if (permission !== 'granted') {
     showStatus('push-status', 'Permiso denegado. Revisá los permisos del navegador.', 'error');
@@ -363,15 +418,6 @@ async function togglePush() {
   }
 }
 
-async function testPush() {
-  showStatus('push-status', 'Enviando notificación de prueba...', 'info');
-  const result = await api('POST', '/api/push/test');
-  if (result.ok) {
-    showStatus('push-status', 'Notificación enviada', 'success');
-  } else {
-    showStatus('push-status', 'No hay suscripciones activas o falló el envío', 'error');
-  }
-}
 
 function urlBase64ToUint8Array(base64String) {
   const padding = '='.repeat((4 - base64String.length % 4) % 4);

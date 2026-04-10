@@ -6,23 +6,30 @@
   <meta name="theme-color" content="#0f172a">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <title>Tenis Bot - CAEP</title>
+  <title>BOTenis</title>
   <link rel="stylesheet" href="style.css">
   <link rel="manifest" href="/manifest.json">
   <link rel="apple-touch-icon" href="/icons/icon-192.png">
 </head>
 <body>
   <div class="container">
-    <h1>Tenis Bot - CAEP</h1>
-
     <div id="login-status" class="status"></div>
 
     <!-- New Reservation -->
     <section class="card">
       <h2>Nueva Reserva</h2>
-      <div class="form-group">
-        <label>Nombre (referencia)</label>
-        <input type="text" id="res-name" placeholder="Ej: Tenis martes noche" style="width:100%">
+      <div class="form-row-half">
+        <div class="form-group">
+          <label>Nombre (referencia)</label>
+          <input type="text" id="res-name" placeholder="Ej: Tenis martes noche">
+        </div>
+        <div class="form-group">
+          <label>Recurrencia</label>
+          <select id="res-recurring">
+            <option value="1" selected>Semanal</option>
+            <option value="0">Única</option>
+          </select>
+        </div>
       </div>
 
       <div class="form-row-half">
@@ -34,23 +41,49 @@
           </select>
         </div>
         <div class="form-group">
-          <label>Fecha</label>
-          <input type="date" id="res-fecha">
+          <label>Día</label>
+          <select id="res-dia">
+            <option value="">-- Seleccionar --</option>
+            <option value="1">Lunes</option>
+            <option value="2">Martes</option>
+            <option value="3">Miércoles</option>
+            <option value="4">Jueves</option>
+            <option value="5">Viernes</option>
+            <option value="6">Sábado</option>
+            <option value="0">Domingo</option>
+          </select>
         </div>
       </div>
 
-      <div class="form-row-half">
-        <div class="form-group">
-          <label>Cancha</label>
-          <select id="res-cancha">
-            <option value="">-- Seleccionar --</option>
-          </select>
-        </div>
-        <div class="form-group">
-          <label>Hora</label>
-          <input type="time" id="res-hora" step="900">
+      <div class="form-group">
+        <label>Opción 1 (prioridad)</label>
+        <div class="form-row-half" style="margin-bottom:0">
+          <div class="form-group">
+            <select id="res-cancha1">
+              <option value="">-- Cancha --</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <input type="time" id="res-hora1" step="900">
+          </div>
         </div>
       </div>
+
+      <div class="form-group">
+        <label>Opción 2 (alternativa)</label>
+        <div class="form-row-half" style="margin-bottom:0">
+          <div class="form-group">
+            <select id="res-cancha2">
+              <option value="">-- Cancha --</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <input type="time" id="res-hora2" step="900">
+          </div>
+        </div>
+      </div>
+
+      <div id="schedule-info" class="schedule-info"></div>
 
       <div class="form-group">
         <label>Jugadores</label>
@@ -66,12 +99,8 @@
         </div>
       </div>
 
-      <div id="schedule-info" class="schedule-info"></div>
-
-      <div class="form-row">
-        <button onclick="saveReservation()" class="btn-primary" style="flex:1">Guardar Reserva</button>
-        <button onclick="togglePush()" id="push-btn" class="btn-secondary" style="flex:1">Activar Notificaciones</button>
-      </div>
+      <button onclick="saveReservation()" class="btn-primary">Guardar Reserva</button>
+      <button onclick="togglePush()" id="push-btn" class="btn-secondary" style="width:100%;margin-top:8px">Activar Notificaciones</button>
       <p id="push-ios-hint" class="push-hint" style="display:none">En iOS, primero agregá la app a la pantalla de inicio y abrila desde ahí.</p>
       <div id="save-status" class="status"></div>
       <div id="push-status" class="status"></div>
@@ -83,14 +112,19 @@
       <div id="reservations-list"></div>
     </section>
 
-
     <!-- Logs -->
     <section class="card">
-      <h2>Logs</h2>
-      <button onclick="loadLogs()" class="btn-secondary">Actualizar</button>
-      <button onclick="clearLogs()" class="btn-danger">Borrar logs</button>
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+        <h2 style="margin:0;flex:1">Logs</h2>
+        <button onclick="loadLogs()" class="btn-secondary" style="padding:8px 16px">Actualizar</button>
+        <button onclick="clearLogs()" class="btn-danger" style="padding:8px 16px">Borrar logs</button>
+      </div>
       <div id="logs-list"></div>
     </section>
+
+    <footer style="text-align:center;padding:16px 0;color:#64748b;font-size:0.85em">
+      App creada por <a href="https://github.com/sdilauro" target="_blank" style="color:#93c5fd">sdilauro</a>
+    </footer>
   </div>
 
   <script src="app.js"></script>

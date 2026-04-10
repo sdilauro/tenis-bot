@@ -21,7 +21,6 @@ const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
 const LOG_PATH = path.join(DATA_DIR, 'logs.json');
 const VAPID_PATH = path.join(DATA_DIR, 'vapid.json');
 
-// Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
@@ -65,22 +64,68 @@ function updateReservationStatus(id, status, detail) {
   const config = loadConfig();
   const r = (config.reservations || []).find(r => r.id === id);
   if (!r) return;
-  r.status = status; // 'pending' | 'ok' | 'failed'
+  r.status = status;
   r.lastAttempt = new Date().toISOString();
   r.attempts = (r.attempts || 0) + 1;
   if (detail) r.lastError = detail;
+  else if (status === 'ok') r.lastError = null;
   saveConfig(config);
+}
+
+function setLastExecutedFecha(id, fecha) {
+  const config = loadConfig();
+  const r = (config.reservations || []).find(r => r.id === id);
+  if (!r) return;
+  r.lastExecutedFecha = fecha;
+  saveConfig(config);
+}
+
+function deleteReservationFromConfig(id) {
+  const config = loadConfig();
+  config.reservations = (config.reservations || []).filter(r => r.id !== id);
+  saveConfig(config);
+  if (scheduledJobs[id]) {
+    scheduledJobs[id].stop();
+    delete scheduledJobs[id];
+  }
+}
+
+// --- Timezone helpers ---
+
+const DIAS = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+
+function getBuenosAiresNow() {
+  return new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Argentina/Buenos_Aires' }));
+}
+
+function formatFecha(date) {
+  const dd = String(date.getDate()).padStart(2, '0');
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+}
+
+// Calculate the reservation date (fecha) based on schedule type when the bot fires
+function calculateFecha(scheduleType) {
+  const now = getBuenosAiresNow();
+  if (scheduleType === 'morning') {
+    // Bot runs night before → reservation is for tomorrow
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    return formatFecha(tomorrow);
+  } else {
+    // Bot runs morning of → reservation is for today
+    return formatFecha(now);
+  }
 }
 
 // --- API Routes ---
 
-// Get config
 app.get('/api/config', (req, res) => {
   const config = loadConfig();
   res.json(config);
 });
 
-// Test login
 app.post('/api/test-login', async (req, res) => {
   if (!CREDENTIALS.email || !CREDENTIALS.password) {
     return res.json({ success: false, error: 'Credenciales no configuradas en .env' });
@@ -95,7 +140,6 @@ app.post('/api/test-login', async (req, res) => {
   }
 });
 
-// Debug: view profile HTML (temporary)
 app.get('/api/debug/perfil', async (req, res) => {
   const bot = new TenisBot();
   try {
@@ -108,7 +152,6 @@ app.get('/api/debug/perfil', async (req, res) => {
   }
 });
 
-// Search players (requires login)
 app.get('/api/players/search', async (req, res) => {
   const bot = new TenisBot();
   try {
@@ -121,7 +164,6 @@ app.get('/api/players/search', async (req, res) => {
   }
 });
 
-// Get available slots
 app.get('/api/slots', async (req, res) => {
   const { cantPers, fecha } = req.query;
   const bot = new TenisBot();
@@ -135,20 +177,28 @@ app.get('/api/slots', async (req, res) => {
   }
 });
 
-// Save reservation (always starts as pending)
-app.post('/api/reservations', (req, res) => {
+function requirePassword(req, res, next) {
+  const pw = req.headers['x-password'] || req.body?.password;
+  if (pw !== CREDENTIALS.password) {
+    return res.status(401).json({ ok: false, error: 'Contraseña incorrecta' });
+  }
+  next();
+}
+
+// Save reservation
+app.post('/api/reservations', requirePassword, (req, res) => {
   const config = loadConfig();
   const reservation = {
     ...req.body,
     id: Date.now().toString(),
     status: 'pending',
     attempts: 0,
+    lastExecutedFecha: null,
   };
   config.reservations = config.reservations || [];
   config.reservations.push(reservation);
   saveConfig(config);
 
-  // Schedule if enabled
   if (reservation.schedule?.enabled) {
     scheduleReservation(reservation, CREDENTIALS);
   }
@@ -157,11 +207,10 @@ app.post('/api/reservations', (req, res) => {
 });
 
 // Delete reservation
-app.delete('/api/reservations/:id', (req, res) => {
+app.delete('/api/reservations/:id', requirePassword, (req, res) => {
   const config = loadConfig();
   config.reservations = (config.reservations || []).filter(r => r.id !== req.params.id);
   saveConfig(config);
-  // Stop scheduled job if any
   if (scheduledJobs[req.params.id]) {
     scheduledJobs[req.params.id].stop();
     delete scheduledJobs[req.params.id];
@@ -169,24 +218,29 @@ app.delete('/api/reservations/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// Execute reservation NOW
+// Execute reservation NOW (manual trigger)
 app.post('/api/reservations/:id/execute', async (req, res) => {
   const config = loadConfig();
   const reservation = (config.reservations || []).find(r => r.id === req.params.id);
   if (!reservation) return res.json({ success: false, error: 'Reserva no encontrada' });
 
-  const result = await executeReservation(CREDENTIALS, reservation);
+  // For manual execution, use the next occurrence date
+  const fecha = calculateFechaForReservation(reservation);
+  const result = await executeReservation(CREDENTIALS, reservation, fecha);
+
+  // For non-recurring, delete after manual execution too
+  if (!reservation.recurring && (result.success || !result.retryable)) {
+    deleteReservationFromConfig(reservation.id);
+  }
+
   res.json(result);
 });
 
-
-// Get logs
 app.get('/api/logs', (req, res) => {
   try { res.json(JSON.parse(fs.readFileSync(LOG_PATH, 'utf8'))); }
   catch { res.json([]); }
 });
 
-// Delete logs
 app.delete('/api/logs', (req, res) => {
   fs.writeFileSync(LOG_PATH, '[]');
   res.json({ ok: true });
@@ -218,10 +272,6 @@ app.post('/api/push/unsubscribe', (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/push/test', async (req, res) => {
-  const result = await sendPushToAll('Tenis Bot', 'Notificación de prueba OK');
-  res.json({ ok: result.sent > 0, sent: result.sent, failed: result.failed });
-});
 
 // --- Push notification sending ---
 
@@ -258,11 +308,14 @@ async function sendPushToAll(title, body) {
 // --- Notification ---
 
 async function notifyResult(reservation, success, detail) {
-  const status = success ? 'OK' : 'FALLO';
-  const msg = `${reservation.name} - ${reservation.fecha} ${reservation.hora} ${reservation.cancha}${detail ? ' - ' + detail : ''}`;
+  const icon = success ? '🎾' : '😞';
+  const diaName = DIAS[reservation.dia] || '';
+  const msg = success
+    ? `${diaName} - ${detail}`
+    : `${diaName} - No se pudo reservar`;
 
   try {
-    await sendPushToAll(`Tenis Bot [${status}]`, msg);
+    await sendPushToAll(`${icon} Tenis Bot`, msg);
   } catch (err) {
     console.log(`Error enviando push: ${err.message}`);
   }
@@ -271,12 +324,31 @@ async function notifyResult(reservation, success, detail) {
 // --- Reservation execution ---
 
 const MAX_RETRIES = 10;
-const RETRY_DELAY_MS = 15000; // 15 seconds between retries
+const RETRY_DELAY_MS = 15000;
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
-async function executeReservation(credentials, reservation) {
+// Calculate fecha for a reservation (for manual execution or startup)
+function calculateFechaForReservation(reservation) {
+  const now = getBuenosAiresNow();
+  const targetDay = reservation.dia;
+  const today = now.getDay();
+  let daysUntil = targetDay - today;
+  if (daysUntil < 0) daysUntil += 7;
+  if (daysUntil === 0) {
+    // If it's the same day, check if we can still reserve for today
+    // Morning slots: if it's before ~20:00 the day before, we'd be too early
+    // But for manual execution, use today if it's the target day
+    // For scheduled, the cron handles timing
+  }
+  const targetDate = new Date(now);
+  targetDate.setDate(targetDate.getDate() + daysUntil);
+  return formatFecha(targetDate);
+}
+
+async function executeReservation(credentials, reservation, fecha) {
   const bot = new TenisBot();
+  const opciones = reservation.opciones || [];
   const log = { reservation: reservation.name || reservation.id, steps: [] };
 
   try {
@@ -288,7 +360,7 @@ async function executeReservation(credentials, reservation) {
       log.success = false;
       appendLog(log);
       updateReservationStatus(reservation.id, 'failed', loginResult.error);
-      await notifyResult(reservation, false, loginResult.error);
+      await notifyResult(reservation, false);
       return { success: false, error: loginResult.error, log };
     }
     log.steps.push(`Login OK: ${loginResult.userName}`);
@@ -303,106 +375,133 @@ async function executeReservation(credentials, reservation) {
         appendLog(log);
         await bot.logout();
         updateReservationStatus(reservation.id, 'failed', `Jugador ${pid}: ${check}`);
-        await notifyResult(reservation, false, `Jugador ${pid}: ${check}`);
+        await notifyResult(reservation, false);
         return { success: false, error: `Jugador ${pid}: ${check}`, log };
       }
     }
     log.steps.push('Todos los jugadores habilitados');
 
-    // 3. Get available slots and find the matching one
+    // 3. Get available slots
     const cantPers = playerIds.length >= 4 ? 4 : 2;
-    const fecha = reservation.fecha;
     const slots = await bot.getAvailableSlots(cantPers, fecha);
-    log.steps.push(`${slots.length} turnos disponibles`);
+    log.steps.push(`${slots.length} turnos disponibles para ${fecha}`);
 
     if (!slots.length) {
       log.steps.push('No hay turnos disponibles');
       log.success = false;
       appendLog(log);
       await bot.logout();
-      // No marcar failed ni notificar, queda pending para reintentar (puede que aún no se habilitaron)
       updateReservationStatus(reservation.id, 'pending', 'No hay turnos disponibles aún');
       return { success: false, error: 'No hay turnos disponibles', log, retryable: true };
     }
 
-    // 4. Find the specific slot matching cancha + hora
-    // Reserva guarda "CANCHA 1", pero los slots usan "CA1", "CA2", etc.
-    const canchaNum = (reservation.cancha || '').match(/(\d+)/)?.[1] || '';
-    const targetCanchaShort = `ca${canchaNum}`;
-    const targetHora = (reservation.hora || '').trim();
-    log.steps.push(`Buscando: cancha="${reservation.cancha}" (CA${canchaNum}) hora="${targetHora}"`);
-    log.steps.push(`Slots disponibles: ${slots.map(s => `[${s.id}] ${s.text}`).join(' | ')}`);
+    log.steps.push(`Slots: ${slots.map(s => `[${s.id}] ${s.text}`).join(' | ')}`);
 
-    let selectedSlot = slots.find(s => {
-      const slotText = s.text.toLowerCase().replace(/\s+/g, '');
-      const hasCancha = slotText.includes(targetCanchaShort);
-      const hasHora = s.text.includes(targetHora) || s.id?.includes(targetHora);
-      return hasCancha && hasHora;
-    });
+    // 4. Try each option in order
+    for (let i = 0; i < opciones.length; i++) {
+      const opcion = opciones[i];
+      const canchaNum = (opcion.cancha || '').match(/(\d+)/)?.[1] || '';
+      const targetCanchaShort = `ca${canchaNum}`;
+      const targetHora = (opcion.hora || '').trim();
 
-    if (!selectedSlot) {
-      log.steps.push(`No se encontró turno para ${reservation.cancha} a las ${reservation.hora}`);
-      log.success = false;
-      appendLog(log);
-      await bot.logout();
-      updateReservationStatus(reservation.id, 'failed', `Turno no disponible: ${reservation.cancha} ${reservation.hora}`);
-      await notifyResult(reservation, false, `Turno no disponible: ${reservation.cancha} ${reservation.hora}`);
-      return { success: false, error: `Turno no disponible: ${reservation.cancha} ${reservation.hora}`, log };
+      log.steps.push(`Intentando opción ${i + 1}: ${opcion.cancha} a las ${targetHora}`);
+
+      const selectedSlot = slots.find(s => {
+        const slotText = s.text.toLowerCase().replace(/\s+/g, '');
+        const hasCancha = slotText.includes(targetCanchaShort);
+        const hasHora = s.text.includes(targetHora) || s.id?.includes(targetHora);
+        return hasCancha && hasHora;
+      });
+
+      if (!selectedSlot) {
+        log.steps.push(`Opción ${i + 1} no disponible: ${opcion.cancha} ${targetHora}`);
+        continue;
+      }
+
+      log.steps.push(`Turno encontrado: ${selectedSlot.text}`);
+
+      // Try to make the reservation
+      const result = await bot.makeReservation({
+        playerIds,
+        cantPers,
+        fecha,
+        horarioId: selectedSlot.id,
+      });
+
+      if (result.success) {
+        log.steps.push(`RESERVADA: ${opcion.cancha} a las ${targetHora}`);
+        log.success = true;
+        appendLog(log);
+        await bot.logout();
+        updateReservationStatus(reservation.id, 'ok', null);
+        await notifyResult(reservation, true, `${opcion.cancha} - ${targetHora}`);
+        return { success: true, log, cancha: opcion.cancha, hora: targetHora };
+      }
+
+      log.steps.push(`Error reservando opción ${i + 1}: ${result.error}`);
     }
 
-    log.steps.push(`Turno seleccionado: ${selectedSlot.text}`);
-
-    // 5. Make reservation
-    const result = await bot.makeReservation({
-      playerIds,
-      cantPers,
-      fecha,
-      horarioId: selectedSlot.id,
-    });
-
-    log.steps.push(`Resultado: ${JSON.stringify(result)}`);
-    log.success = result.success;
+    // None of the options worked
+    const detail = `No se pudo reservar ninguna opción para ${fecha}`;
+    log.steps.push(detail);
+    log.success = false;
     appendLog(log);
     await bot.logout();
+    updateReservationStatus(reservation.id, 'failed', detail);
+    await notifyResult(reservation, false);
+    return { success: false, error: detail, log };
 
-    if (result.success) {
-      updateReservationStatus(reservation.id, 'ok', null);
-      await notifyResult(reservation, true, 'RESERVADA');
-    } else {
-      updateReservationStatus(reservation.id, 'failed', result.error);
-      await notifyResult(reservation, false, result.error);
-    }
-
-    return { ...result, log };
   } catch (err) {
     log.steps.push(`Error: ${err.message}`);
     log.success = false;
     appendLog(log);
     try { await bot.logout(); } catch {}
     updateReservationStatus(reservation.id, 'failed', err.message);
-    await notifyResult(reservation, false, err.message);
+    await notifyResult(reservation, false);
     return { success: false, error: err.message, log };
   }
 }
 
-// Execute with retries
+// Execute with retries, then handle recurring/non-recurring cleanup
 async function executeWithRetries(credentials, reservation) {
+  const fecha = calculateFecha(reservation.schedule.type);
+
+  // For recurring: mark the fecha we're executing for
+  if (reservation.recurring) {
+    setLastExecutedFecha(reservation.id, fecha);
+  }
+
+  // Reset status to pending for this execution cycle
+  const config = loadConfig();
+  const r = (config.reservations || []).find(r => r.id === reservation.id);
+  if (r) {
+    r.status = 'pending';
+    r.attempts = 0;
+    r.lastError = null;
+    saveConfig(config);
+  }
+
+  let lastResult = null;
+
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    console.log(`[${new Date().toISOString()}] Intento ${attempt}/${MAX_RETRIES}: ${reservation.name}`);
+    console.log(`[${new Date().toISOString()}] Intento ${attempt}/${MAX_RETRIES}: ${reservation.name} (${fecha})`);
 
-    const result = await executeReservation(credentials, reservation);
+    lastResult = await executeReservation(credentials, reservation, fecha);
 
-    if (result.success) {
+    if (lastResult.success) {
       console.log(`[${new Date().toISOString()}] Reserva OK: ${reservation.name}`);
-      return result;
+      break;
     }
 
-    // Re-read reservation status (executeReservation may have set it to 'failed')
-    const config = loadConfig();
-    const current = (config.reservations || []).find(r => r.id === reservation.id);
-    if (current?.status === 'failed') {
+    // Re-read reservation status
+    const current = loadConfig().reservations?.find(r => r.id === reservation.id);
+    if (!current) {
+      console.log(`[${new Date().toISOString()}] Reserva eliminada, deteniendo: ${reservation.name}`);
+      return lastResult;
+    }
+    if (current.status === 'failed') {
       console.log(`[${new Date().toISOString()}] Reserva marcada como fallida, no se reintenta: ${reservation.name}`);
-      return result;
+      break;
     }
 
     if (attempt < MAX_RETRIES) {
@@ -411,33 +510,25 @@ async function executeWithRetries(credentials, reservation) {
     }
   }
 
-  // All retries exhausted
-  updateReservationStatus(reservation.id, 'failed', `Sin éxito después de ${MAX_RETRIES} intentos`);
-  await notifyResult(reservation, false, `Sin éxito después de ${MAX_RETRIES} intentos`);
+  // If still pending after all retries (shouldn't normally happen, but just in case)
+  const final = loadConfig().reservations?.find(r => r.id === reservation.id);
+  if (final && final.status === 'pending') {
+    updateReservationStatus(reservation.id, 'failed', `Sin éxito después de ${MAX_RETRIES} intentos`);
+    await notifyResult(reservation, false);
+  }
+
+  // Cleanup for non-recurring reservations
+  if (!reservation.recurring) {
+    console.log(`[${new Date().toISOString()}] Reserva no recurrente "${reservation.name}" finalizada, eliminando...`);
+    deleteReservationFromConfig(reservation.id);
+  }
+
+  return lastResult;
 }
 
 // --- Scheduler ---
 
 let scheduledJobs = {};
-
-function getExecutionWindow(reservation) {
-  // Parse reservation date (DD/MM/YYYY)
-  const [dd, mm, yyyy] = reservation.fecha.split('/').map(Number);
-  const reservationDate = new Date(yyyy, mm - 1, dd);
-
-  if (reservation.schedule.type === 'morning') {
-    // Turno mañana → bot corre a las 19:59 del día anterior
-    const execDate = new Date(reservationDate);
-    execDate.setDate(execDate.getDate() - 1);
-    execDate.setHours(19, 59, 0, 0);
-    return execDate;
-  } else {
-    // Turno tarde → bot corre a las 07:59 del mismo día
-    const execDate = new Date(reservationDate);
-    execDate.setHours(7, 59, 0, 0);
-    return execDate;
-  }
-}
 
 function scheduleReservation(reservation, credentials) {
   const id = reservation.id;
@@ -446,43 +537,92 @@ function scheduleReservation(reservation, credentials) {
     delete scheduledJobs[id];
   }
 
-  if (!reservation.schedule?.enabled || !reservation.fecha) return;
-  if (reservation.status === 'ok' || reservation.status === 'failed') return;
+  if (!reservation.schedule?.enabled) return;
+  // Don't skip ok/failed for recurring - they execute again next week
+  if (!reservation.recurring && (reservation.status === 'ok' || reservation.status === 'failed')) return;
 
-  const execWindow = getExecutionWindow(reservation);
-  const now = new Date();
+  const targetDay = reservation.dia; // 0=Domingo, 1=Lunes, ..., 6=Sábado
+  const schedType = reservation.schedule.type;
 
-  // If the execution window already passed, execute immediately
-  if (now >= execWindow) {
-    console.log(`[${now.toISOString()}] Ventana ya pasó para "${reservation.name}", ejecutando ahora...`);
-    executeWithRetries(credentials, reservation);
-    return;
-  }
-
-  const [hour, minute] = reservation.schedule.time.split(':');
-  const cronDay = execWindow.getDate();
-  const cronMonth = execWindow.getMonth() + 1;
-
-  // Schedule for specific date+time
-  const cronExpr = `${minute} ${hour} ${cronDay} ${cronMonth} *`;
-
-  scheduledJobs[id] = cron.schedule(cronExpr, async () => {
-    console.log(`[${new Date().toISOString()}] Ejecutando reserva programada: ${reservation.name}`);
-    await executeWithRetries(credentials, reservation);
-    // Cleanup job
-    if (scheduledJobs[id]) {
-      scheduledJobs[id].stop();
-      delete scheduledJobs[id];
+  if (reservation.recurring) {
+    // Weekly cron
+    // Morning: execute at 19:59 on (targetDay - 1)
+    // Afternoon: execute at 07:59 on targetDay
+    let cronDay;
+    if (schedType === 'morning') {
+      cronDay = (targetDay - 1 + 7) % 7; // Day before
+    } else {
+      cronDay = targetDay;
     }
-  }, { timezone: 'America/Argentina/Buenos_Aires' });
+    const cronTime = schedType === 'morning' ? '59 19' : '59 7';
+    const cronExpr = `${cronTime} * * ${cronDay}`;
 
-  const schedLabel = reservation.schedule.type === 'morning'
-    ? `${cronDay}/${cronMonth} a las 19:59`
-    : `${cronDay}/${cronMonth} a las 07:59`;
-  console.log(`Reserva "${reservation.name}" programada para ${schedLabel} -> reservar ${reservation.fecha} ${reservation.hora} ${reservation.cancha}`);
+    scheduledJobs[id] = cron.schedule(cronExpr, async () => {
+      console.log(`[${new Date().toISOString()}] Cron semanal disparado: ${reservation.name}`);
+      // Re-read reservation in case it was deleted
+      const config = loadConfig();
+      const current = config.reservations?.find(r => r.id === id);
+      if (!current) {
+        console.log(`Reserva ${id} ya no existe, deteniendo cron`);
+        if (scheduledJobs[id]) { scheduledJobs[id].stop(); delete scheduledJobs[id]; }
+        return;
+      }
+      await executeWithRetries(credentials, current);
+    }, { timezone: 'America/Argentina/Buenos_Aires' });
+
+    const execDayName = DIAS[cronDay];
+    const execTime = schedType === 'morning' ? '19:59' : '07:59';
+    console.log(`Reserva recurrente "${reservation.name}" programada: ${execDayName} a las ${execTime} → reservar ${DIAS[targetDay]}`);
+
+  } else {
+    // One-time: calculate the next occurrence and schedule for that specific date
+    const now = getBuenosAiresNow();
+    const today = now.getDay();
+    let daysUntil = targetDay - today;
+    if (daysUntil <= 0) daysUntil += 7;
+
+    const targetDate = new Date(now);
+    targetDate.setDate(targetDate.getDate() + daysUntil);
+
+    // Execution date/time
+    let execDate;
+    if (schedType === 'morning') {
+      execDate = new Date(targetDate);
+      execDate.setDate(execDate.getDate() - 1);
+      execDate.setHours(19, 59, 0, 0);
+    } else {
+      execDate = new Date(targetDate);
+      execDate.setHours(7, 59, 0, 0);
+    }
+
+    // If execution window already passed, execute immediately
+    if (now >= execDate) {
+      console.log(`[${now.toISOString()}] Ventana ya pasó para "${reservation.name}", ejecutando ahora...`);
+      executeWithRetries(credentials, reservation);
+      return;
+    }
+
+    const cronDay = execDate.getDate();
+    const cronMonth = execDate.getMonth() + 1;
+    const cronMinute = schedType === 'morning' ? 59 : 59;
+    const cronHour = schedType === 'morning' ? 19 : 7;
+    const cronExpr = `${cronMinute} ${cronHour} ${cronDay} ${cronMonth} *`;
+
+    scheduledJobs[id] = cron.schedule(cronExpr, async () => {
+      console.log(`[${new Date().toISOString()}] Cron one-time disparado: ${reservation.name}`);
+      const config = loadConfig();
+      const current = config.reservations?.find(r => r.id === id);
+      if (!current) return;
+      await executeWithRetries(credentials, current);
+      // Cleanup done inside executeWithRetries for non-recurring
+    }, { timezone: 'America/Argentina/Buenos_Aires' });
+
+    const schedLabel = `${cronDay}/${cronMonth} a las ${cronHour}:${String(cronMinute).padStart(2, '0')}`;
+    console.log(`Reserva única "${reservation.name}" programada para ${schedLabel} → reservar ${DIAS[targetDay]} ${formatFecha(targetDate)}`);
+  }
 }
 
-// On startup: re-schedule pending reservations, and execute any whose window already passed
+// On startup: re-schedule all active reservations
 async function loadSchedules() {
   if (!CREDENTIALS.email) {
     console.log('[STARTUP] CAEP_EMAIL no configurado en .env, no se programan reservas');
@@ -490,21 +630,54 @@ async function loadSchedules() {
   }
 
   const config = loadConfig();
-  const now = new Date();
+  const now = getBuenosAiresNow();
 
   for (const r of config.reservations || []) {
-    // Skip completed or permanently failed
-    if (r.status === 'ok' || r.status === 'failed') continue;
-    if (!r.schedule?.enabled || !r.fecha) continue;
+    if (!r.schedule?.enabled) continue;
 
-    const execWindow = getExecutionWindow(r);
+    if (r.recurring) {
+      // Always re-schedule recurring reservations
+      scheduleReservation(r, CREDENTIALS);
 
-    if (now >= execWindow) {
-      // Window already passed and reservation is still pending → execute now
-      console.log(`[STARTUP] Reserva pendiente "${r.name}" - ventana ya pasó (${execWindow.toISOString()}), ejecutando ahora...`);
-      executeWithRetries(CREDENTIALS, r);
+      // Check if we missed this week's execution
+      const targetDay = r.dia;
+      const today = now.getDay();
+      const schedType = r.schedule.type;
+
+      // Calculate this week's execution window
+      let daysToTarget = targetDay - today;
+      // Look at this week's target day (could be in the past)
+      const thisWeekTarget = new Date(now);
+      thisWeekTarget.setDate(thisWeekTarget.getDate() + daysToTarget);
+      const thisWeekFecha = formatFecha(thisWeekTarget);
+
+      let execDate;
+      if (schedType === 'morning') {
+        execDate = new Date(thisWeekTarget);
+        execDate.setDate(execDate.getDate() - 1);
+        execDate.setHours(19, 59, 0, 0);
+      } else {
+        execDate = new Date(thisWeekTarget);
+        execDate.setHours(7, 59, 0, 0);
+      }
+
+      // If the execution window passed and we haven't executed for this fecha
+      if (now >= execDate && r.lastExecutedFecha !== thisWeekFecha) {
+        // Also check that the target day hasn't fully passed (we can still reserve today's slots)
+        const targetEndOfDay = new Date(thisWeekTarget);
+        targetEndOfDay.setHours(23, 59, 59, 999);
+        if (now <= targetEndOfDay) {
+          console.log(`[STARTUP] Reserva recurrente "${r.name}" - ventana pasó para ${thisWeekFecha}, ejecutando ahora...`);
+          executeWithRetries(CREDENTIALS, r);
+        }
+      }
     } else {
-      // Window hasn't arrived yet → schedule normally
+      // Non-recurring: only if still pending
+      if (r.status === 'ok' || r.status === 'failed') {
+        // Clean up completed non-recurring reservations
+        deleteReservationFromConfig(r.id);
+        continue;
+      }
       scheduleReservation(r, CREDENTIALS);
     }
   }

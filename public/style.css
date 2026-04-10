@@ -117,22 +117,28 @@ button {
 button:hover { background: #475569; }
 
 .btn-primary {
-  background: #0ea5e9;
+  background: #1e40af;
   color: white;
   width: 100%;
   padding: 12px;
   font-weight: 600;
 }
-.btn-primary:hover { background: #0284c7; }
+.btn-primary:hover { background: #1d4ed8; }
 
-.btn-secondary { background: #1e40af; }
+.btn-secondary { background: #1e40af; padding: 12px; font-weight: 600; }
 .btn-secondary:hover { background: #1d4ed8; }
 
 .btn-danger { background: #991b1b; }
 .btn-danger:hover { background: #b91c1c; }
 
-.btn-success { background: #166534; }
-.btn-success:hover { background: #15803d; }
+.btn-success { background: #1e40af; }
+.btn-success:hover { background: #1d4ed8; }
+
+.btn-sm { padding: 4px 12px; font-size: 0.85em; }
+
+#login-status {
+  margin-bottom: 16px;
+}
 
 .status {
   margin-top: 10px;
@@ -250,11 +256,13 @@ button:hover { background: #475569; }
   display: flex;
   gap: 8px;
   margin-top: 10px;
+  justify-content: flex-end;
 }
 
 .reservation-actions button {
   font-size: 0.85em;
   padding: 6px 14px;
+  font-weight: normal;
 }
 
 /* Slots grid */
