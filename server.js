@@ -238,12 +238,14 @@ async function executeSingleAttempt(credentials, reservation, fecha) {
     const playerIds = reservation.players.map(p => p.id);
     for (const pid of playerIds) {
       const check = await bot.checkPlayerCanReserve(pid);
-      if (check !== 'OK') {
-        log.steps.push(`Jugador ${pid} no puede reservar: ${check}`);
+      const checkTrimmed = (typeof check === 'string' ? check.trim() : '');
+      log.steps.push(`Jugador ${pid}: respuesta="${checkTrimmed}"`);
+      if (checkTrimmed !== 'OK') {
+        log.steps.push(`Jugador ${pid} no puede reservar: "${checkTrimmed}"`);
         log.success = false;
         appendLog(log);
         await bot.logout();
-        return { success: false, error: `Jugador ${pid}: ${check}`, log };
+        return { success: false, error: `Jugador ${pid}: ${checkTrimmed || '(respuesta vacía)'}`, log };
       }
     }
     log.steps.push('Todos los jugadores habilitados');
@@ -468,15 +470,17 @@ async function executeWithRetries(credentials, reservation) {
     const playerIds = reservation.players.map(p => p.id);
     for (const pid of playerIds) {
       const check = await bot.checkPlayerCanReserve(pid);
-      if (check !== 'OK') {
-        log.steps.push(`Jugador ${pid} no puede reservar: ${check}`);
+      const checkTrimmed = (typeof check === 'string' ? check.trim() : '');
+      log.steps.push(`Jugador ${pid}: respuesta="${checkTrimmed}"`);
+      if (checkTrimmed !== 'OK') {
+        log.steps.push(`Jugador ${pid} no puede reservar: "${checkTrimmed}"`);
         log.success = false;
         appendLog(log);
         await bot.logout();
-        updateReservationStatus(reservation.id, 'failed', `Jugador ${pid}: ${check}`);
+        updateReservationStatus(reservation.id, 'failed', `Jugador ${pid}: ${checkTrimmed || '(respuesta vacía)'}`);
         await notifyResult(reservation, false);
         if (!reservation.recurring) deleteReservationFromConfig(reservation.id);
-        return { success: false, error: `Jugador ${pid}: ${check}`, log };
+        return { success: false, error: `Jugador ${pid}: ${checkTrimmed || '(respuesta vacía)'}`, log };
       }
     }
     log.steps.push('Todos los jugadores habilitados');
@@ -754,8 +758,12 @@ async function loadSchedules() {
 
 // --- Start ---
 
+const VERSION = '1.1.0';
 const PORT = process.env.PORT || 3000;
+
+app.get('/api/version', (req, res) => res.json({ version: VERSION }));
+
 app.listen(PORT, () => {
-  console.log(`Tenis Bot corriendo en http://localhost:${PORT}`);
+  console.log(`Tenis Bot v${VERSION} corriendo en http://localhost:${PORT}`);
   loadSchedules();
 });
