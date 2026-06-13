@@ -239,9 +239,8 @@ async function executeSingleAttempt(credentials, reservation, fecha) {
     for (const pid of playerIds) {
       const check = await bot.checkPlayerCanReserve(pid);
       const checkTrimmed = (typeof check === 'string' ? check.trim() : '');
-      log.steps.push(`Jugador ${pid}: respuesta="${checkTrimmed}"`);
       if (checkTrimmed !== 'OK') {
-        log.steps.push(`Jugador ${pid} no puede reservar: "${checkTrimmed}"`);
+        log.steps.push(`Jugador ${pid} no puede reservar (respuesta: "${checkTrimmed}")`);
         log.success = false;
         appendLog(log);
         await bot.logout();
@@ -471,9 +470,8 @@ async function executeWithRetries(credentials, reservation) {
     for (const pid of playerIds) {
       const check = await bot.checkPlayerCanReserve(pid);
       const checkTrimmed = (typeof check === 'string' ? check.trim() : '');
-      log.steps.push(`Jugador ${pid}: respuesta="${checkTrimmed}"`);
       if (checkTrimmed !== 'OK') {
-        log.steps.push(`Jugador ${pid} no puede reservar: "${checkTrimmed}"`);
+        log.steps.push(`Jugador ${pid} no puede reservar (respuesta: "${checkTrimmed}")`);
         log.success = false;
         appendLog(log);
         await bot.logout();
