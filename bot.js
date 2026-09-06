@@ -2,11 +2,26 @@ const axios = require('axios');
 
 const BASE_URL = 'https://caeptenis.rand.inm.me';
 
+// El sitio de CAEP (sistema "salt" de Rand Online) migró de ASP clásico (.asp)
+// a ASP.NET (.aspx/.ashx) en sept-2026. Endpoints actuales:
+//   POST /Login.aspx                          -> login, responde JSON {ok, redirect}
+//   GET  /ConectorCombo.ashx                  -> combos (búsqueda de jugadores)
+//   GET  /ConectorValor.ashx?valo_orig=GETDBVALUE  -> funciones DEV_* (check jugador, turnos)
+//   POST /Reservas.aspx                        -> alta de reserva (2 pasos: VALIDAR luego ALTA)
+// Las respuestas de submit son JSON: éxito {ok:true, redirect|message|html|eval},
+// error {ok:false, error|message}.
+
+function parseJson(data) {
+  if (data == null) return null;
+  if (typeof data !== 'string') return data;
+  try { return JSON.parse(data); } catch { return null; }
+}
+
 class TenisBot {
   constructor() {
     this.cookies = '';
     this.loggedIn = false;
-    this.userId = null;
+    this.userId = null;   // ID de socio del titular (va fijo como jugador 1)
     this.userName = null;
   }
 
@@ -26,7 +41,6 @@ class TenisBot {
     const setCookies = res.headers['set-cookie'];
     if (!setCookies) return;
     const parsed = setCookies.map(c => c.split(';')[0]);
-    // Merge with existing cookies
     const existing = Object.fromEntries(
       this.cookies.split('; ').filter(Boolean).map(c => c.split('='))
     );
@@ -38,154 +52,116 @@ class TenisBot {
   }
 
   async login(email, password) {
-    const body = `Valo_Orig=INGRESAR&Valo_Dest=&txt_email=${encodeURIComponent(email)}&txt_password=${encodeURIComponent(password)}`;
-
-    // First GET to get session cookie
-    const initRes = await this._client().get('/index.asp?formato=INGRESAR');
+    // 1. GET a la página de ingreso para obtener la cookie de sesión (ASP.NET_SessionId)
+    const initRes = await this._client().get('/Default.aspx?formato=INGRESAR');
     this._extractCookies(initRes);
 
-    // POST login
-    const res = await this._client().post('/salt/EnviarConsulta.asp', body);
+    // 2. POST de credenciales -> JSON {ok, redirect} | {ok:false, error/message}
+    const body = `Valo_Orig=INGRESAR&Valo_Dest=&txt_email=${encodeURIComponent(email)}&txt_password=${encodeURIComponent(password)}`;
+    const res = await this._client().post('/Login.aspx', body);
     this._extractCookies(res);
 
-    const data = res.data;
-    if (typeof data === 'string' && data.startsWith('Redir:')) {
-      this.loggedIn = true;
-
-      // Follow redirect
-      const redirUrl = data.substring(6);
-      const pageRes = await this._client().get(redirUrl);
-      this._extractCookies(pageRes);
-
-      // Get user name from PERFIL page
-      const perfilRes = await this._client().get('/index.asp?formato=PERFIL');
-      this._extractCookies(perfilRes);
-      const perfilHtml = perfilRes.data;
-
-      // Try multiple patterns - attribute order varies
-      const namePatterns = [
-        /name="txt_nombre"[^>]*value="([^"]+)"/i,
-        /value="([^"]+)"[^>]*name="txt_nombre"/i,
-        /name='txt_nombre'[^>]*value='([^']+)'/i,
-        /id="txt_nombre"[^>]*value="([^"]+)"/i,
-        /txt_nombre[^>]*value="([^"]+)"/i,
-      ];
-      for (const pat of namePatterns) {
-        const m = perfilHtml.match(pat);
-        if (m) {
-          this.userName = m[1].trim();
-          break;
-        }
-      }
-
-      if (!this.userName) {
-        // Log a snippet around txt_nombre for debugging
-        const idx = perfilHtml.indexOf('txt_nombre');
-        if (idx !== -1) {
-          console.log('[DEBUG] txt_nombre context:', perfilHtml.substring(Math.max(0, idx - 80), idx + 120));
-        } else {
-          console.log('[DEBUG] txt_nombre NOT found in PERFIL page. Page length:', perfilHtml.length);
-          // Try to find any name-like field
-          const anyName = perfilHtml.match(/nombre[^>]*value="([^"]+)"/i);
-          if (anyName) {
-            console.log('[DEBUG] Found alternative nombre field:', anyName[0]);
-            this.userName = anyName[1].trim();
-          }
-        }
-      }
-
-      // Get user ID by searching for own name in players list
-      if (this.userName) {
-        const surname = this.userName.split(' ').pop(); // last word as surname
-        const searchRes = await this._client().get('/salt/conectorJSONSalt.asp', {
-          params: { idCombo: 'CLIENTE-FILTRO-CATE', term: surname },
-        });
-        const results = typeof searchRes.data === 'string' ? JSON.parse(searchRes.data) : searchRes.data;
-        if (Array.isArray(results)) {
-          // Match by checking if the search result contains parts of the user's name
-          const nameParts = this.userName.toUpperCase().split(' ').filter(p => p.length > 2);
-          const match = results.find(r =>
-            nameParts.every(part => r.text.toUpperCase().includes(part))
-          );
-          if (match) this.userId = match.id;
-        }
-      }
-
-      return { success: true, userId: this.userId, userName: this.userName };
-    } else if (typeof data === 'string' && data.startsWith('Messg:')) {
-      return { success: false, error: data.substring(6) };
+    const data = parseJson(res.data);
+    if (!data || data.ok !== true) {
+      const err = (data && (data.error || data.message)) || 'Credenciales inválidas';
+      return { success: false, error: err };
     }
-    return { success: false, error: 'Respuesta inesperada del servidor' };
+    this.loggedIn = true;
+
+    // 3. Cargar el form de alta: registra los combos en la sesión (necesario para
+    //    ConectorCombo.ashx) y expone el ID/nombre del titular (cbCliente1, precargado).
+    try {
+      const altaRes = await this._client().get('/Default.aspx?formato=FRM-RESERVA&subformato=ALTA-RESERVA');
+      this._extractCookies(altaRes);
+      const html = typeof altaRes.data === 'string' ? altaRes.data : '';
+      const m = html.match(/CargarComboS2\(\s*['"]cbCliente1['"][\s\S]*?id:\s*['"](\d+)['"][\s\S]*?text:\s*['"]([^'"]*)['"]/);
+      if (m) {
+        this.userId = m[1];
+        this.userName = m[2].trim();
+      }
+    } catch { /* no bloquea el login */ }
+
+    return { success: true, userId: this.userId, userName: this.userName };
   }
 
   async searchPlayers(term) {
     if (!this.loggedIn) throw new Error('No logueado');
-    const res = await this._client().get('/salt/conectorJSONSalt.asp', {
+    const res = await this._client().get('/ConectorCombo.ashx', {
       params: { idCombo: 'CLIENTE-FILTRO-CATE', term },
     });
-    return res.data; // [{id, text}, ...]
+    return parseJson(res.data) || []; // [{id, text}, ...]
   }
 
   async checkPlayerCanReserve(playerId) {
     if (!this.loggedIn) throw new Error('No logueado');
-    const res = await this._client().get('/salt/enviarconsulta.asp', {
+    const res = await this._client().get('/ConectorValor.ashx', {
       params: {
         valo_orig: 'GETDBVALUE',
         valo_func: 'DEV_ENTI_PUEDE_RESERVAR',
         valo_id: `C,${playerId}`,
       },
     });
-    return res.data; // "OK" or error reason
+    // "OK" o un código de motivo: DEUDASALDO, DEUDAABONO, RESERVAPENDIENTE, ...
+    return res.data;
   }
 
   async getAvailableSlots(cantPers, fecha) {
     if (!this.loggedIn) throw new Error('No logueado');
-    // cantPers: 2 or 4, fecha: "DD/MM/YYYY"
-    const res = await this._client().get('/salt/enviarconsulta.asp', {
+    // cantPers: 2 o 4, fecha: "DD/MM/YYYY"
+    const res = await this._client().get('/ConectorValor.ashx', {
       params: {
         valo_orig: 'GETDBVALUE',
         valo_func: 'DEV_ITEMS_PEDIDO_PERIODOS',
         valo_id: `${cantPers},${fecha},1`,
       },
     });
-    // Response is JSON array [{id, text}, ...]
-    // text format like "CANCHA 1 - 09:00 a 10:00"
-    // id format like "12249|09:00"
-    const data = res.data;
-    if (typeof data === 'string') {
-      try { return JSON.parse(data); } catch { return []; }
-    }
-    return data || [];
+    // JSON array [{id, text}]. Formato nuevo:
+    //   id:   "269860|1"       (idReserva|especialidad)
+    //   text: "17:45 - CA3"    (hora - CAncha)
+    return parseJson(res.data) || [];
   }
 
   async makeReservation({ playerIds, cantPers, fecha, horarioId }) {
     if (!this.loggedIn) throw new Error('No logueado');
 
-    const body = [
-      'Valo_Orig=FRM-PEDIDO',
-      'Valo_Func=ALTA-RESERVA',
-      `Valo_Jugadores=${playerIds.join(',')}`,
-      `Valo_CantPers=${cantPers}`,
-      `cbFecha=${encodeURIComponent(fecha)}`,
-      `cbHorario=${encodeURIComponent(horarioId)}`,
-    ].join('&');
+    // El titular (this.userId) va SIEMPRE como jugador 1 (cbCliente1, fijo en la web).
+    const owner = this.userId ? String(this.userId) : null;
+    const others = (playerIds || []).map(String).filter(id => id && id !== owner);
+    const finalPlayers = (owner ? [owner, ...others] : others).slice(0, 4);
+    const cant = cantPers || (finalPlayers.length >= 4 ? 4 : 2);
 
-    const res = await this._client().post('/salt/EnviarConsulta.asp', body);
-    const data = res.data;
+    const buildBody = (valoFunc) => {
+      const p = new URLSearchParams();
+      p.set('Valo_Orig', 'FRM-RESERVA');
+      p.set('Valo_Func', valoFunc);
+      p.set('Valo_Id', '');
+      p.set('Valo_Jugadores', finalPlayers.join(','));
+      p.set('Valo_CantPers', String(cant));
+      for (let i = 1; i <= 4; i++) p.set('cbCliente' + i, finalPlayers[i - 1] || '');
+      p.set('cbFecha', fecha);
+      p.set('cbHorario', horarioId);
+      return p.toString();
+    };
 
-    if (typeof data === 'string') {
-      if (data.startsWith('Redir:')) return { success: true, redirect: data.substring(6) };
-      if (data.startsWith('Messg:')) return { success: false, error: data.substring(6) };
-      if (data.startsWith('Eval:')) return { success: true, eval: data.substring(5) };
-      // HTML response — likely success
-      return { success: true, html: data.substring(0, 200) };
+    // Paso 1: validar restricciones. Si falla (ok:false) devolvemos el motivo.
+    const valRes = await this._client().post('/Reservas.aspx', buildBody('VALIDAR-RESTRICCION-RESERVA'));
+    const val = parseJson(valRes.data);
+    if (val && val.ok === false) {
+      return { success: false, error: val.error || val.message || 'Restricción de reserva' };
     }
-    return { success: false, error: 'Respuesta inesperada' };
+
+    // Paso 2: alta efectiva.
+    const altaRes = await this._client().post('/Reservas.aspx', buildBody('ALTA-RESERVA'));
+    const alta = parseJson(altaRes.data);
+    if (alta && alta.ok === true) {
+      return { success: true, message: alta.message || alta.redirect || 'Reserva realizada' };
+    }
+    return { success: false, error: (alta && (alta.error || alta.message)) || 'No se pudo reservar' };
   }
 
   async logout() {
     try {
-      await this._client().get('/index.asp?formato=SALIR');
+      await this._client().get('/Default.aspx?formato=SALIR');
     } catch {}
     this.loggedIn = false;
     this.cookies = '';

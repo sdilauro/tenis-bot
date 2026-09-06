@@ -235,7 +235,11 @@ async function executeSingleAttempt(credentials, reservation, fecha) {
     }
     log.steps.push(`Login OK: ${loginResult.userName}`);
 
-    const playerIds = reservation.players.map(p => p.id);
+    // El titular (this.userId, jugador 1 fijo en la web nueva) va siempre primero.
+    const ownerId = loginResult.userId ? String(loginResult.userId) : null;
+    const playerIds = ownerId
+      ? [ownerId, ...reservation.players.map(p => String(p.id)).filter(id => id !== ownerId)].slice(0, 4)
+      : reservation.players.map(p => String(p.id)).slice(0, 4);
     for (const pid of playerIds) {
       const check = await bot.checkPlayerCanReserve(pid);
       const checkTrimmed = (typeof check === 'string' ? check.trim() : '');
@@ -265,11 +269,12 @@ async function executeSingleAttempt(credentials, reservation, fecha) {
       const opcion = opciones[i];
       const canchaNum = (opcion.cancha || '').match(/(\d+)/)?.[1] || '';
       const targetHora = (opcion.hora || '').trim();
-      const canchaPattern = new RegExp(`cancha\\s*${canchaNum}\\b`, 'i');
+      // Formato nuevo del slot: text "17:45 - CA3" (hora - CAncha)
+      const canchaPattern = new RegExp(`\\bCA0*${canchaNum}\\b`, 'i');
 
       const selectedSlot = slots.find(s => {
         const hasCancha = canchaPattern.test(s.text);
-        const hasHora = s.text.includes(targetHora) || s.id?.includes(targetHora);
+        const hasHora = s.text.includes(targetHora);
         return hasCancha && hasHora;
       });
 
@@ -466,7 +471,11 @@ async function executeWithRetries(credentials, reservation) {
     log.steps.push(`Login OK: ${loginResult.userName}`);
 
     // 2. Check players once
-    const playerIds = reservation.players.map(p => p.id);
+    // El titular (this.userId, jugador 1 fijo en la web nueva) va siempre primero.
+    const ownerId = loginResult.userId ? String(loginResult.userId) : null;
+    const playerIds = ownerId
+      ? [ownerId, ...reservation.players.map(p => String(p.id)).filter(id => id !== ownerId)].slice(0, 4)
+      : reservation.players.map(p => String(p.id)).slice(0, 4);
     for (const pid of playerIds) {
       const check = await bot.checkPlayerCanReserve(pid);
       const checkTrimmed = (typeof check === 'string' ? check.trim() : '');
@@ -533,10 +542,11 @@ async function executeWithRetries(credentials, reservation) {
 
         log.steps.push(`Intentando opción ${i + 1}: ${opcion.cancha} a las ${targetHora}`);
 
-        const canchaPattern = new RegExp(`cancha\\s*${canchaNum}\\b`, 'i');
+        // Formato nuevo del slot: text "17:45 - CA3" (hora - CAncha)
+        const canchaPattern = new RegExp(`\\bCA0*${canchaNum}\\b`, 'i');
         const selectedSlot = slots.find(s => {
           const hasCancha = canchaPattern.test(s.text);
-          const hasHora = s.text.includes(targetHora) || s.id?.includes(targetHora);
+          const hasHora = s.text.includes(targetHora);
           return hasCancha && hasHora;
         });
 
@@ -756,7 +766,7 @@ async function loadSchedules() {
 
 // --- Start ---
 
-const VERSION = '1.1.0';
+const VERSION = '2.0.0';
 const PORT = process.env.PORT || 3000;
 
 app.get('/api/version', (req, res) => res.json({ version: VERSION }));
