@@ -1,4 +1,4 @@
-name: Deploy to Oracle VM
+name: Deploy to VPS
 
 on:
   push:
@@ -13,9 +13,10 @@ jobs:
         with:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
+          port: ${{ secrets.VM_PORT }}
           key: ${{ secrets.VM_SSH_KEY }}
           script: |
-            cd ~/tenis-bot
-            git pull
+            cd /opt/tenis-bot
+            git pull --ff-only
             npm ci --omit=dev
-            pm2 restart tenis-bot
+            systemctl restart tenis-bot

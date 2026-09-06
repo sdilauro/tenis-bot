@@ -1,0 +1,21 @@
+[Unit]
+Description=Tenis Bot (reservas CAEP) — Node/Express + node-cron
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tenis-bot
+ExecStart=/usr/bin/node server.js
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=TZ=America/Argentina/Buenos_Aires
+# Datos de runtime (config.json, vapid.json, logs.json) fuera del repo:
+# un re-clone/git reset no los toca. server.js lo lee de DATA_DIR.
+Environment=DATA_DIR=/var/lib/tenis-bot
+# Credenciales CAEP (CAEP_EMAIL, CAEP_PASSWORD). NO va en el repo.
+EnvironmentFile=/etc/tenis-bot.env
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
