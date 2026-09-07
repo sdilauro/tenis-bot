@@ -260,9 +260,8 @@ app.post('/api/reservations', requirePassword, (req, res) => {
   config.reservations.push(reservation);
   saveConfig(config);
 
-  if (reservation.schedule?.enabled) {
-    scheduleReservation(reservation, CREDENTIALS);
-  }
+  // No hace falta programar nada: los disparos globales (12:00 y 20:00) intentan
+  // todas las reservas activas. Se puede ejecutar manualmente con "Ejecutar".
 
   res.json({ ok: true, id: reservation.id });
 });
@@ -316,12 +315,16 @@ async function executeSingleAttempt(credentials, reservation, fecha) {
 
     const cantPers = playerIds.length >= 4 ? 4 : 2;
     const slots = await bot.getAvailableSlots(cantPers, fecha);
-    log.steps.push(`${slots.length} turnos disponibles para ${fecha}`);
+    log.steps.push(`${slots.length} turnos reales para ${fecha}`);
 
     if (!slots.length) {
+      // getAvailableSlots filtra el placeholder "0|0": vacío = inscripciones aún
+      // cerradas (o sin cupo). En el disparo automático se sigue reintentando.
+      const msg = 'Inscripciones aún cerradas o sin cupo (no hay turnos reales todavía)';
+      log.steps.push(msg);
       log.success = false;
       appendLog(log);
-      return { success: false, error: 'No hay turnos disponibles', log };
+      return { success: false, error: msg, log };
     }
 
     log.steps.push(`Slots: ${slots.map(s => `[${s.id}] ${s.text}`).join(' | ')}`);
@@ -460,8 +463,10 @@ async function notifyResult(reservation, success, detail) {
 
 // --- Reservation execution ---
 
-const MAX_RETRIES = 20;
-const RETRY_DELAY_MS = 3000;
+// Parámetros de la "carrera" (primerear la apertura de 12:00 / 20:00):
+// pre-login ~1 min antes, y en T0 polling rápido de turnos + reserva inmediata.
+const RACE_POLL_MS = 400;         // frecuencia de polling durante la carrera
+const RACE_DURATION_MS = 30000;   // cuánto insistir tras la apertura antes de rendirse
 
 function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
@@ -480,13 +485,14 @@ function calculateFechaForReservation(reservation) {
   return formatFecha(targetDate);
 }
 
-// Execute with retries: login once, then poll for slots rapidly
-async function executeWithRetries(credentials, reservation) {
-  const fecha = calculateFecha(reservation.schedule.type);
+// Ejecución con "carrera": pre-login, esperar la apertura (openHour:00) y ahí
+// polling rápido de turnos + reserva inmediata. openHour = 12 o 20 (o null = ya).
+async function executeWithRetries(credentials, reservation, openHour) {
+  const fecha = calculateFechaForReservation(reservation);
 
-  // For recurring: mark the fecha we're executing for
-  if (reservation.recurring) {
-    setLastExecutedFecha(reservation.id, fecha);
+  // Anti doble-reserva: si ya se reservó para esta fecha (recurrente), no repetir.
+  if (reservation.recurring && reservation.lastExecutedFecha === fecha) {
+    return { success: false, error: 'ya-reservado', silent: true };
   }
 
   // Reset status to pending for this execution cycle
@@ -542,90 +548,81 @@ async function executeWithRetries(credentials, reservation) {
 
     const cantPers = playerIds.length >= 4 ? 4 : 2;
 
-    // 3. Wait until 20:00:00 if we're early (cron fires at 19:59)
-    if (reservation.schedule?.type === 'morning') {
+    // 3. Pre-warm listo (login + jugadores validados). Esperar hasta la apertura
+    //    exacta (openHour:00:00). El cron dispara ~1 min antes para llegar caliente.
+    if (openHour != null) {
       const now = getBuenosAiresNow();
-      const targetHour = 20;
-      const msUntilTarget = ((targetHour - now.getHours()) * 3600 + (0 - now.getMinutes()) * 60 + (0 - now.getSeconds())) * 1000 - now.getMilliseconds();
-      if (msUntilTarget > 0 && msUntilTarget < 120000) {
-        log.steps.push(`Esperando ${Math.round(msUntilTarget / 1000)}s hasta las 20:00...`);
-        await sleep(msUntilTarget);
+      const msUntilOpen = ((openHour - now.getHours()) * 3600 - now.getMinutes() * 60 - now.getSeconds()) * 1000 - now.getMilliseconds();
+      if (msUntilOpen > 0 && msUntilOpen < 5 * 60 * 1000) {
+        log.steps.push(`Pre-login listo. Esperando ${Math.round(msUntilOpen / 1000)}s hasta la apertura (${openHour}:00)...`);
+        await sleep(Math.max(0, msUntilOpen - 300)); // despertar ~300ms antes de T0
       }
     }
 
-    // 4. Retry loop: only fetch slots + attempt reservation
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      console.log(`[${new Date().toISOString()}] Intento ${attempt}/${MAX_RETRIES}: ${reservation.name} (${fecha})`);
+    // 4. Carrera: polling rápido de turnos desde T0 y reserva inmediata.
+    console.log(`[${new Date().toISOString()}] Carrera iniciada: ${reservation.name} (${fecha})`);
+    const raceDeadline = Date.now() + RACE_DURATION_MS;
+    let sawSlots = false;
 
-      // Check if reservation was deleted
+    while (Date.now() <= raceDeadline) {
+      // ¿La reserva fue eliminada mientras corría la carrera?
       const current = loadConfig().reservations?.find(r => r.id === reservation.id);
       if (!current) {
-        console.log(`Reserva ${reservation.id} eliminada, deteniendo`);
         await bot.logout();
         return { success: false, error: 'Reserva eliminada', log };
       }
 
       const slots = await bot.getAvailableSlots(cantPers, fecha);
 
-      if (!slots.length) {
-        log.steps.push(`Intento ${attempt}: No hay turnos disponibles aún`);
-        updateReservationStatus(reservation.id, 'pending', 'No hay turnos disponibles aún');
-        if (attempt < MAX_RETRIES) {
-          await sleep(RETRY_DELAY_MS);
-          continue;
+      if (slots.length) {
+        if (!sawSlots) {
+          sawSlots = true;
+          log.steps.push(`Apertura detectada: ${slots.length} turnos. ${slots.map(s => `[${s.id}] ${s.text}`).join(' | ')}`);
         }
-        break;
-      }
-
-      if (attempt === 1 || slots.length > 0) {
-        log.steps.push(`${slots.length} turnos disponibles: ${slots.map(s => `[${s.id}] ${s.text}`).join(' | ')}`);
-      }
-
-      // Candidatos ordenados: misma cancha + hora más cercana, luego cualquier
-      // cancha (±TIME_TOLERANCE_MIN). Se prueban en orden hasta que uno reserve.
-      const ranked = rankSlots(slots, opciones);
-      if (!ranked.length) {
-        log.steps.push(`Intento ${attempt}: sin turnos cerca de las opciones pedidas`);
-      }
-      for (const cand of ranked) {
-        log.steps.push(`Intentando: ${cand.cancha} a las ${cand.hora} (${cand.slot.text})`);
-
-        const result = await bot.makeReservation({
-          playerIds,
-          cantPers,
-          fecha,
-          horarioId: cand.slot.id,
-        });
-
-        if (result.success) {
-          log.steps.push(`RESERVADA: ${cand.cancha} a las ${cand.hora}`);
-          log.success = true;
-          appendLog(log);
-          await bot.logout();
-          updateReservationStatus(reservation.id, 'ok', null);
-          await notifyResult(reservation, true, `${cand.cancha} - ${cand.hora}`);
-          if (!reservation.recurring) deleteReservationFromConfig(reservation.id);
-          return { success: true, log, cancha: cand.cancha, hora: cand.hora };
+        // Misma cancha + hora más cercana, luego cualquier cancha (±tolerancia).
+        const ranked = rankSlots(slots, opciones);
+        for (const cand of ranked) {
+          log.steps.push(`Intentando: ${cand.cancha} a las ${cand.hora} (${cand.slot.text})`);
+          const result = await bot.makeReservation({ playerIds, cantPers, fecha, horarioId: cand.slot.id });
+          if (result.success) {
+            log.steps.push(`RESERVADA: ${cand.cancha} a las ${cand.hora}`);
+            log.success = true;
+            appendLog(log);
+            await bot.logout();
+            updateReservationStatus(reservation.id, 'ok', null);
+            setLastExecutedFecha(reservation.id, fecha);
+            await notifyResult(reservation, true, `${cand.cancha} - ${cand.hora}`);
+            if (!reservation.recurring) deleteReservationFromConfig(reservation.id);
+            return { success: true, log, cancha: cand.cancha, hora: cand.hora };
+          }
+          log.steps.push(`Error reservando: ${result.error}`);
         }
-
-        log.steps.push(`Error reservando: ${result.error}`);
+        // Había turnos pero no pudimos reservar (nos ganaron / sin opción válida):
+        // seguimos la carrera por si se libera otro.
       }
 
-      // Slots exist but none matched — retry in case new ones appear
-      if (attempt < MAX_RETRIES) {
-        await sleep(RETRY_DELAY_MS);
-      }
+      await sleep(RACE_POLL_MS);
     }
 
-    // All retries exhausted
-    const detail = `No se pudo reservar ninguna opción para ${fecha} después de ${MAX_RETRIES} intentos`;
+    await bot.logout();
+
+    if (!sawSlots) {
+      // La ventana no abrió para esta fecha en este ciclo. No es un error real
+      // (brute-force 12/20 diario): reintenta en el próximo horario. Sin push.
+      log.steps.push(`Sin apertura para ${fecha} en este ciclo (${openHour ?? '?'}:00). Reintenta en el próximo horario.`);
+      log.success = false;
+      appendLog(log);
+      updateReservationStatus(reservation.id, 'pending', null);
+      return { success: false, error: 'ventana-no-abierta', silent: true, log };
+    }
+
+    // Vimos turnos pero no logramos reservar: fallo real (perdimos la carrera).
+    const detail = `Turnos abiertos pero no se pudo reservar para ${fecha}`;
     log.steps.push(detail);
     log.success = false;
     appendLog(log);
-    await bot.logout();
     updateReservationStatus(reservation.id, 'failed', detail);
     await notifyResult(reservation, false);
-    if (!reservation.recurring) deleteReservationFromConfig(reservation.id);
     return { success: false, error: detail, log };
 
   } catch (err) {
@@ -644,162 +641,49 @@ async function executeWithRetries(credentials, reservation) {
 
 let scheduledJobs = {};
 
-function scheduleReservation(reservation, credentials) {
-  const id = reservation.id;
-  if (scheduledJobs[id]) {
-    scheduledJobs[id].stop();
-    delete scheduledJobs[id];
-  }
+// Las reservas ya no se programan una por una. Hay dos disparos GLOBALES diarios
+// —12:00 y 20:00 (apertura de inscripciones)— que intentan TODAS las reservas
+// activas. El cron dispara 1 min antes (11:59 / 19:59) para pre-loguear.
+// A futuro se puede afinar por reserva (ej: sábado a la mañana → viernes 20:00).
 
-  if (!reservation.schedule?.enabled) return;
-  // Don't skip ok/failed for recurring - they execute again next week
-  if (!reservation.recurring && (reservation.status === 'ok' || reservation.status === 'failed')) return;
-
-  const targetDay = reservation.dia; // 0=Domingo, 1=Lunes, ..., 6=Sábado
-  const schedType = reservation.schedule.type;
-
-  if (reservation.recurring) {
-    // Weekly cron
-    // Morning: execute at 19:59 on (targetDay - 1)
-    // Afternoon: execute at 07:59 on targetDay
-    let cronDay;
-    if (schedType === 'morning') {
-      cronDay = (targetDay - 1 + 7) % 7; // Day before
-    } else {
-      cronDay = targetDay;
-    }
-    const cronTime = schedType === 'morning' ? '59 19' : '59 7';
-    const cronExpr = `${cronTime} * * ${cronDay}`;
-
-    scheduledJobs[id] = cron.schedule(cronExpr, async () => {
-      console.log(`[${new Date().toISOString()}] Cron semanal disparado: ${reservation.name}`);
-      // Re-read reservation in case it was deleted
-      const config = loadConfig();
-      const current = config.reservations?.find(r => r.id === id);
-      if (!current) {
-        console.log(`Reserva ${id} ya no existe, deteniendo cron`);
-        if (scheduledJobs[id]) { scheduledJobs[id].stop(); delete scheduledJobs[id]; }
-        return;
-      }
-      await executeWithRetries(credentials, current);
-    }, { timezone: 'America/Argentina/Buenos_Aires' });
-
-    const execDayName = DIAS[cronDay];
-    const execTime = schedType === 'morning' ? '19:59' : '07:59';
-    console.log(`Reserva recurrente "${reservation.name}" programada: ${execDayName} a las ${execTime} → reservar ${DIAS[targetDay]}`);
-
-  } else {
-    // One-time: calculate the next occurrence and schedule for that specific date
-    const now = getBuenosAiresNow();
-    const today = now.getDay();
-    let daysUntil = targetDay - today;
-    if (daysUntil <= 0) daysUntil += 7;
-
-    const targetDate = new Date(now);
-    targetDate.setDate(targetDate.getDate() + daysUntil);
-
-    // Execution date/time
-    let execDate;
-    if (schedType === 'morning') {
-      execDate = new Date(targetDate);
-      execDate.setDate(execDate.getDate() - 1);
-      execDate.setHours(19, 59, 0, 0);
-    } else {
-      execDate = new Date(targetDate);
-      execDate.setHours(7, 59, 0, 0);
-    }
-
-    // If execution window already passed, execute immediately
-    if (now >= execDate) {
-      console.log(`[${now.toISOString()}] Ventana ya pasó para "${reservation.name}", ejecutando ahora...`);
-      executeWithRetries(credentials, reservation);
-      return;
-    }
-
-    const cronDay = execDate.getDate();
-    const cronMonth = execDate.getMonth() + 1;
-    const cronMinute = schedType === 'morning' ? 59 : 59;
-    const cronHour = schedType === 'morning' ? 19 : 7;
-    const cronExpr = `${cronMinute} ${cronHour} ${cronDay} ${cronMonth} *`;
-
-    scheduledJobs[id] = cron.schedule(cronExpr, async () => {
-      console.log(`[${new Date().toISOString()}] Cron one-time disparado: ${reservation.name}`);
-      const config = loadConfig();
-      const current = config.reservations?.find(r => r.id === id);
-      if (!current) return;
-      await executeWithRetries(credentials, current);
-      // Cleanup done inside executeWithRetries for non-recurring
-    }, { timezone: 'America/Argentina/Buenos_Aires' });
-
-    const schedLabel = `${cronDay}/${cronMonth} a las ${cronHour}:${String(cronMinute).padStart(2, '0')}`;
-    console.log(`Reserva única "${reservation.name}" programada para ${schedLabel} → reservar ${DIAS[targetDay]} ${formatFecha(targetDate)}`);
+// Dispara todas las reservas activas para una apertura (openHour = 12 o 20).
+function runAllReservations(openHour) {
+  if (!CREDENTIALS.email) return;
+  const config = loadConfig();
+  const activos = (config.reservations || []).filter(r =>
+    r.schedule?.enabled && !(!r.recurring && r.status === 'ok')
+  );
+  console.log(`[${new Date().toISOString()}] Disparo ${openHour}:00 — ${activos.length} reserva(s) activa(s)`);
+  // En paralelo: cada reserva es una sesión independiente y compiten a la vez.
+  for (const r of activos) {
+    executeWithRetries(CREDENTIALS, r, openHour).catch(err =>
+      console.error(`Error en reserva "${r.name}":`, err.message));
   }
 }
 
-// On startup: re-schedule all active reservations
+function installDailyTriggers() {
+  for (const key of ['__open12', '__open20']) {
+    if (scheduledJobs[key]) { scheduledJobs[key].stop(); delete scheduledJobs[key]; }
+  }
+  const tz = { timezone: 'America/Argentina/Buenos_Aires' };
+  // Disparo 1 min antes para pre-login; executeWithRetries espera hasta T0 exacto.
+  scheduledJobs['__open12'] = cron.schedule('59 11 * * *', () => runAllReservations(12), tz);
+  scheduledJobs['__open20'] = cron.schedule('59 19 * * *', () => runAllReservations(20), tz);
+  console.log('Disparos diarios instalados: 12:00 y 20:00 (Buenos Aires)');
+}
+
+// On startup: instalar los disparos diarios.
 async function loadSchedules() {
   if (!CREDENTIALS.email) {
     console.log('[STARTUP] CAEP_EMAIL no configurado en .env, no se programan reservas');
     return;
   }
-
-  const config = loadConfig();
-  const now = getBuenosAiresNow();
-
-  for (const r of config.reservations || []) {
-    if (!r.schedule?.enabled) continue;
-
-    if (r.recurring) {
-      // Always re-schedule recurring reservations
-      scheduleReservation(r, CREDENTIALS);
-
-      // Check if we missed this week's execution
-      const targetDay = r.dia;
-      const today = now.getDay();
-      const schedType = r.schedule.type;
-
-      // Calculate this week's execution window
-      let daysToTarget = targetDay - today;
-      // Look at this week's target day (could be in the past)
-      const thisWeekTarget = new Date(now);
-      thisWeekTarget.setDate(thisWeekTarget.getDate() + daysToTarget);
-      const thisWeekFecha = formatFecha(thisWeekTarget);
-
-      let execDate;
-      if (schedType === 'morning') {
-        execDate = new Date(thisWeekTarget);
-        execDate.setDate(execDate.getDate() - 1);
-        execDate.setHours(19, 59, 0, 0);
-      } else {
-        execDate = new Date(thisWeekTarget);
-        execDate.setHours(7, 59, 0, 0);
-      }
-
-      // If the execution window passed and we haven't executed for this fecha
-      if (now >= execDate && r.lastExecutedFecha !== thisWeekFecha) {
-        // Also check that the target day hasn't fully passed (we can still reserve today's slots)
-        const targetEndOfDay = new Date(thisWeekTarget);
-        targetEndOfDay.setHours(23, 59, 59, 999);
-        if (now <= targetEndOfDay) {
-          console.log(`[STARTUP] Reserva recurrente "${r.name}" - ventana pasó para ${thisWeekFecha}, ejecutando ahora...`);
-          executeWithRetries(CREDENTIALS, r);
-        }
-      }
-    } else {
-      // Non-recurring: only if still pending
-      if (r.status === 'ok' || r.status === 'failed') {
-        // Clean up completed non-recurring reservations
-        deleteReservationFromConfig(r.id);
-        continue;
-      }
-      scheduleReservation(r, CREDENTIALS);
-    }
-  }
+  installDailyTriggers();
 }
 
 // --- Start ---
 
-const VERSION = '2.0.0';
+const VERSION = '2.1.0';
 const PORT = process.env.PORT || 3000;
 
 app.get('/api/version', (req, res) => res.json({ version: VERSION }));

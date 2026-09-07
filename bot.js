@@ -118,7 +118,13 @@ class TenisBot {
     // JSON array [{id, text}]. Formato nuevo:
     //   id:   "269860|1"       (idReserva|especialidad)
     //   text: "17:45 - CA3"    (hora - CAncha)
-    return parseJson(res.data) || [];
+    // Cuando las inscripciones NO están abiertas, el sitio devuelve un placeholder
+    // [{id:"0|0", text:"Sin disponibilidad"}]. Lo filtramos: array vacío = "aún
+    // cerrado / sin cupo" → el que llama sigue reintentando con el horario pedido.
+    const data = parseJson(res.data);
+    if (!Array.isArray(data)) return [];
+    return data.filter(s =>
+      s && s.id && s.id !== '0|0' && !/sin disponibilidad/i.test(s.text || ''));
   }
 
   async makeReservation({ playerIds, cantPers, fecha, horarioId }) {
