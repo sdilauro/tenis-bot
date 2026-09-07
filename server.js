@@ -105,6 +105,67 @@ function formatFecha(date) {
   return `${dd}/${mm}/${yyyy}`;
 }
 
+// --- Slot matching (con fallback a la hora más cercana) ---
+
+// Ventana máxima de diferencia respecto al horario pedido. Si el horario exacto
+// no está, se reserva el turno disponible más cercano dentro de ±TIME_TOLERANCE_MIN.
+const TIME_TOLERANCE_MIN = 60; // ±1 hora
+
+function _toMinutes(hhmm) {
+  const m = String(hhmm || '').match(/(\d{1,2}):(\d{2})/);
+  return m ? parseInt(m[1], 10) * 60 + parseInt(m[2], 10) : null;
+}
+
+// Slot nuevo: text "17:45 - CA3" → { minutes: 1065, court: 3 }
+function _parseSlot(s) {
+  const tm = String(s.text || '').match(/(\d{1,2}):(\d{2})/);
+  const cm = String(s.text || '').match(/CA0*(\d+)/i);
+  return {
+    slot: s,
+    minutes: tm ? parseInt(tm[1], 10) * 60 + parseInt(tm[2], 10) : null,
+    court: cm ? parseInt(cm[1], 10) : null,
+  };
+}
+
+// Ordena los slots disponibles por prioridad de reserva:
+//   1) misma cancha que la opción, hora más cercana a la pedida (±tolerancia),
+//      recorriendo las opciones en su orden de prioridad;
+//   2) fallback: cualquier cancha, hora más cercana.
+// Devuelve candidatos { slot, cancha, hora } (cancha/hora reales del turno), sin
+// duplicados, el mejor primero.
+function rankSlots(slots, opciones, toleranceMin = TIME_TOLERANCE_MIN) {
+  const parsed = (slots || []).map(_parseSlot).filter(p => p.minutes != null);
+  const ranked = [];
+  const seen = new Set();
+
+  const pushCands = (opcion, requireCourt) => {
+    const canchaNum = parseInt((opcion.cancha || '').match(/(\d+)/)?.[1], 10);
+    const targetMin = _toMinutes(opcion.hora);
+    if (targetMin == null) return;
+    parsed
+      .filter(p => Math.abs(p.minutes - targetMin) <= toleranceMin)
+      .filter(p => !requireCourt || p.court === canchaNum)
+      .sort((a, b) =>
+        Math.abs(a.minutes - targetMin) - Math.abs(b.minutes - targetMin) ||
+        a.minutes - b.minutes)
+      .forEach(p => {
+        if (seen.has(p.slot.id)) return;
+        seen.add(p.slot.id);
+        const hh = String(Math.floor(p.minutes / 60)).padStart(2, '0');
+        const mm = String(p.minutes % 60).padStart(2, '0');
+        ranked.push({
+          slot: p.slot,
+          cancha: p.court != null ? `Cancha ${p.court}` : (opcion.cancha || ''),
+          hora: `${hh}:${mm}`,
+        });
+      });
+  };
+
+  for (const opcion of opciones || []) pushCands(opcion, true);  // pase 1: misma cancha
+  for (const opcion of opciones || []) pushCands(opcion, false); // pase 2: cualquier cancha
+  return ranked;
+}
+
 // Calculate the reservation date (fecha) based on schedule type when the bot fires
 function calculateFecha(scheduleType) {
   const now = getBuenosAiresNow();
@@ -265,26 +326,13 @@ async function executeSingleAttempt(credentials, reservation, fecha) {
 
     log.steps.push(`Slots: ${slots.map(s => `[${s.id}] ${s.text}`).join(' | ')}`);
 
-    for (let i = 0; i < opciones.length; i++) {
-      const opcion = opciones[i];
-      const canchaNum = (opcion.cancha || '').match(/(\d+)/)?.[1] || '';
-      const targetHora = (opcion.hora || '').trim();
-      // Formato nuevo del slot: text "17:45 - CA3" (hora - CAncha)
-      const canchaPattern = new RegExp(`\\bCA0*${canchaNum}\\b`, 'i');
-
-      const selectedSlot = slots.find(s => {
-        const hasCancha = canchaPattern.test(s.text);
-        const hasHora = s.text.includes(targetHora);
-        return hasCancha && hasHora;
-      });
-
-      if (!selectedSlot) continue;
-
-      log.steps.push(`Turno encontrado: ${selectedSlot.text}`);
-      const result = await bot.makeReservation({ playerIds, cantPers, fecha, horarioId: selectedSlot.id });
+    const ranked = rankSlots(slots, opciones);
+    for (const cand of ranked) {
+      log.steps.push(`Intentando: ${cand.cancha} a las ${cand.hora} (${cand.slot.text})`);
+      const result = await bot.makeReservation({ playerIds, cantPers, fecha, horarioId: cand.slot.id });
 
       if (result.success) {
-        log.steps.push(`RESERVADA: ${opcion.cancha} a las ${targetHora}`);
+        log.steps.push(`RESERVADA: ${cand.cancha} a las ${cand.hora}`);
         log.success = true;
         appendLog(log);
         await bot.logout();
@@ -533,46 +581,31 @@ async function executeWithRetries(credentials, reservation) {
         log.steps.push(`${slots.length} turnos disponibles: ${slots.map(s => `[${s.id}] ${s.text}`).join(' | ')}`);
       }
 
-      // Try each option in priority order
-      let reserved = false;
-      for (let i = 0; i < opciones.length; i++) {
-        const opcion = opciones[i];
-        const canchaNum = (opcion.cancha || '').match(/(\d+)/)?.[1] || '';
-        const targetHora = (opcion.hora || '').trim();
-
-        log.steps.push(`Intentando opción ${i + 1}: ${opcion.cancha} a las ${targetHora}`);
-
-        // Formato nuevo del slot: text "17:45 - CA3" (hora - CAncha)
-        const canchaPattern = new RegExp(`\\bCA0*${canchaNum}\\b`, 'i');
-        const selectedSlot = slots.find(s => {
-          const hasCancha = canchaPattern.test(s.text);
-          const hasHora = s.text.includes(targetHora);
-          return hasCancha && hasHora;
-        });
-
-        if (!selectedSlot) {
-          log.steps.push(`Opción ${i + 1} no disponible`);
-          continue;
-        }
-
-        log.steps.push(`Turno encontrado: ${selectedSlot.text}`);
+      // Candidatos ordenados: misma cancha + hora más cercana, luego cualquier
+      // cancha (±TIME_TOLERANCE_MIN). Se prueban en orden hasta que uno reserve.
+      const ranked = rankSlots(slots, opciones);
+      if (!ranked.length) {
+        log.steps.push(`Intento ${attempt}: sin turnos cerca de las opciones pedidas`);
+      }
+      for (const cand of ranked) {
+        log.steps.push(`Intentando: ${cand.cancha} a las ${cand.hora} (${cand.slot.text})`);
 
         const result = await bot.makeReservation({
           playerIds,
           cantPers,
           fecha,
-          horarioId: selectedSlot.id,
+          horarioId: cand.slot.id,
         });
 
         if (result.success) {
-          log.steps.push(`RESERVADA: ${opcion.cancha} a las ${targetHora}`);
+          log.steps.push(`RESERVADA: ${cand.cancha} a las ${cand.hora}`);
           log.success = true;
           appendLog(log);
           await bot.logout();
           updateReservationStatus(reservation.id, 'ok', null);
-          await notifyResult(reservation, true, `${opcion.cancha} - ${targetHora}`);
+          await notifyResult(reservation, true, `${cand.cancha} - ${cand.hora}`);
           if (!reservation.recurring) deleteReservationFromConfig(reservation.id);
-          return { success: true, log, cancha: opcion.cancha, hora: targetHora };
+          return { success: true, log, cancha: cand.cancha, hora: cand.hora };
         }
 
         log.steps.push(`Error reservando: ${result.error}`);
