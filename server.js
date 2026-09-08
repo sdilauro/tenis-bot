@@ -127,10 +127,11 @@ function _parseSlot(s) {
   };
 }
 
-// Ordena los slots disponibles por prioridad de reserva:
-//   1) misma cancha que la opción, hora más cercana a la pedida (±tolerancia),
-//      recorriendo las opciones en su orden de prioridad;
-//   2) fallback: cualquier cancha, hora más cercana.
+// Ordena los slots disponibles por prioridad de reserva (opciones en su orden):
+//   0) las opciones EXACTAS (misma cancha + hora exacta);
+//   1) misma cancha, la hora más cercana a la opción (±tolerancia);
+//   2) fallback: cualquier cancha, la hora más cercana.
+// Es decir: primero las opciones exactas, y solo si ninguna está, lo más cercano.
 // Devuelve candidatos { slot, cancha, hora } (cancha/hora reales del turno), sin
 // duplicados, el mejor primero.
 function rankSlots(slots, opciones, toleranceMin = TIME_TOLERANCE_MIN) {
@@ -138,12 +139,12 @@ function rankSlots(slots, opciones, toleranceMin = TIME_TOLERANCE_MIN) {
   const ranked = [];
   const seen = new Set();
 
-  const pushCands = (opcion, requireCourt) => {
+  const pushCands = (opcion, { requireCourt, exactOnly }) => {
     const canchaNum = parseInt((opcion.cancha || '').match(/(\d+)/)?.[1], 10);
     const targetMin = _toMinutes(opcion.hora);
     if (targetMin == null) return;
     parsed
-      .filter(p => Math.abs(p.minutes - targetMin) <= toleranceMin)
+      .filter(p => exactOnly ? p.minutes === targetMin : Math.abs(p.minutes - targetMin) <= toleranceMin)
       .filter(p => !requireCourt || p.court === canchaNum)
       .sort((a, b) =>
         Math.abs(a.minutes - targetMin) - Math.abs(b.minutes - targetMin) ||
@@ -161,8 +162,13 @@ function rankSlots(slots, opciones, toleranceMin = TIME_TOLERANCE_MIN) {
       });
   };
 
-  for (const opcion of opciones || []) pushCands(opcion, true);  // pase 1: misma cancha
-  for (const opcion of opciones || []) pushCands(opcion, false); // pase 2: cualquier cancha
+  const ops = opciones || [];
+  // Pase 0: las opciones EXACTAS (misma cancha + hora exacta), en orden de prioridad.
+  for (const opcion of ops) pushCands(opcion, { requireCourt: true, exactOnly: true });
+  // Pase 1: misma cancha, la hora más cercana a cada opción (±tolerancia).
+  for (const opcion of ops) pushCands(opcion, { requireCourt: true });
+  // Pase 2: cualquier cancha, la hora más cercana a cada opción (fallback final).
+  for (const opcion of ops) pushCands(opcion, { requireCourt: false });
   return ranked;
 }
 
