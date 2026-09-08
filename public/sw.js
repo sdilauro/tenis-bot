@@ -1,4 +1,4 @@
-const CACHE_NAME = 'tenis-bot-v1';
+const CACHE_NAME = 'tenis-bot-v2';
 const SHELL = ['/', '/app.js', '/style.css'];
 
 self.addEventListener('install', e => {

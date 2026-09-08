@@ -240,9 +240,7 @@ async function loadReservations() {
     <div class="reservation-item">
       <div class="reservation-header">
         <h3>${esc(r.name)}</h3>
-        ${r.status === 'pending'
-          ? `<button class="btn-danger btn-sm" onclick="deleteReservation('${r.id}')">Eliminar</button>`
-          : `<span class="reservation-status ${st.cls}">${st.text}${attemptsText}</span>`}
+        <span class="reservation-status ${st.cls}">${st.text}${attemptsText}</span>
       </div>
       <div class="meta">
         <span>${esc(diaName)} — ${esc(recurLabel)}</span>
@@ -261,6 +259,7 @@ async function loadReservations() {
       <div class="reservation-actions">
         <button class="btn-secondary" onclick='copyReservation(${JSON.stringify(JSON.stringify(r))})'>Copiar</button>
         ${r.status !== 'ok' ? `<button class="btn-success" onclick="executeNow('${r.id}')">Ejecutar</button>` : ''}
+        <button class="btn-danger btn-sm" onclick="deleteReservation('${r.id}')">Eliminar</button>
       </div>
     </div>
   `}).join('');
